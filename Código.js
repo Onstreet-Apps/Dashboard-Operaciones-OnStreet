@@ -2879,8 +2879,17 @@ function readSupervisiones(flotaInfo) {
 
   // ---- Leer filas de datos ----
   const supPorFlotaKey = {};
+  const filasSheet = [];      // 1 entrada por móvil presente en "Resumen Supervisiones" (en orden del sheet)
+  const filasSheetSeen = {};  // dedupe por clave canónica
   const sinMatch = [];
   let lastCliente = '';
+
+  // Filas de subtotal / total que a veces cuelgan al final de la hoja
+  function esFilaTotal_(s) {
+    const n = normalize_(s);
+    return n === 'total' || n === 'totales' || n === 'suma' || n === 'suma total' ||
+           n.indexOf('total general') >= 0 || n.indexOf('total flota') >= 0;
+  }
 
   for (let i = headerRow + 1; i < values.length; i++) {
     const row = values[i];
@@ -2895,6 +2904,8 @@ function readSupervisiones(flotaInfo) {
     // Necesitamos al menos un identificador
     if (!concat && !movil) continue;
     if (!cliente && !concat) continue;
+    // Saltar filas de subtotal/total
+    if (esFilaTotal_(concat) || esFilaTotal_(cliente) || esFilaTotal_(movil)) continue;
 
     // Construir el objeto de datos (meses + agregados)
     const supMeses = {};
@@ -2934,37 +2945,42 @@ function readSupervisiones(flotaInfo) {
       f = subsetMatch_(cliente + ' ' + movil);
     }
 
+    // Identidad de salida: la del móvil de Flota si cruzó; si no, la de la propia hoja.
+    let outCliente, outMovil, outNombre;
     if (f) {
+      outCliente = f.cliente;
+      outMovil   = f.movil;
+      outNombre  = f.nombre;
       supPorFlotaKey[(f.cliente + '|' + f.movil).toLowerCase()] = data;
     } else {
+      outCliente = cliente;
+      outMovil   = movil || concat;
+      outNombre  = concat || (cliente + ' ' + movil).trim();
       sinMatch.push({ concat: concat, cliente: cliente, movil: movil });
     }
+
+    const outKey = (outCliente + '|' + outMovil).toLowerCase();
+    if (filasSheetSeen[outKey]) continue;   // el mismo móvil no se lista dos veces
+    filasSheetSeen[outKey] = true;
+    filasSheet.push({
+      nombre: outNombre, cliente: outCliente, movil: outMovil,
+      meses: data.meses, total: data.total, mesesSup: data.mesesSup,
+      meta: data.meta, pctMovil: data.pctMovil
+    });
   }
 
-  // ---- Salida: una fila por móvil de la Flota ----
-  const moviles = flota.map(f => {
-    const key = (f.cliente + '|' + f.movil).toLowerCase();
-    const sup = supPorFlotaKey[key];
-    if (sup) {
-      return {
-        nombre: f.nombre, cliente: f.cliente, movil: f.movil,
-        meses: sup.meses, total: sup.total, mesesSup: sup.mesesSup,
-        meta: sup.meta, pctMovil: sup.pctMovil
-      };
-    }
-    const supMesesVacio = {};
-    meses.forEach(m => { supMesesVacio[m] = 0; });
-    return {
-      nombre: f.nombre, cliente: f.cliente, movil: f.movil,
-      meses: supMesesVacio, total: 0, mesesSup: 0, meta: 0, pctMovil: 0
-    };
-  });
+  // ---- Salida: SÓLO los móviles presentes en "Resumen Supervisiones" ----
+  // (antes se listaba TODA la Flota, por lo que cualquier cliente/móvil recién
+  //  agregado a la hoja Flota aparecía en Supervisiones como "sin funcionamiento
+  //  en el mes". Ahora la lista sale de la propia hoja de Supervisiones.)
+  const moviles = filasSheet;
 
   return {
     moviles: moviles,
     anio: SUPERVISIONES_TAB.match(/\d{4}/) ? SUPERVISIONES_TAB.match(/\d{4}/)[0] : '',
     stats: {
       flotaActiva: flota.length,
+      enSupervisiones: moviles.length,
       cruzados: moviles.filter(m => m.total > 0 || m.meta > 0).length,
       sinCruce: moviles.filter(m => m.total === 0 && m.meta === 0).length,
       filasSupervisionesSinMatch: sinMatch.length,
