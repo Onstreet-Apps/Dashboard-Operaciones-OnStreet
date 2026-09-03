@@ -2945,34 +2945,96 @@ function readSupervisiones(flotaInfo) {
       f = subsetMatch_(cliente + ' ' + movil);
     }
 
-    // Identidad de salida: la del móvil de Flota si cruzó; si no, la de la propia hoja.
-    let outCliente, outMovil, outNombre;
-    if (f) {
-      outCliente = f.cliente;
-      outMovil   = f.movil;
-      outNombre  = f.nombre;
-      supPorFlotaKey[(f.cliente + '|' + f.movil).toLowerCase()] = data;
-    } else {
-      outCliente = cliente;
-      outMovil   = movil || concat;
-      outNombre  = concat || (cliente + ' ' + movil).trim();
+    // Sólo se listan los móviles que están en la hoja de Supervisiones Y en la
+    // Flota activa. Con esto quedan fuera:
+    //  - filas que no son móviles (subtotales "Móviles Supervisados",
+    //    "Supervisiones Totales", "Cumplimiento", etc.)
+    //  - móviles marcados "Sin Funcionamiento" / dados de baja, que ya no están
+    //    en la Flota
+    //  - clientes/móviles recién agregados a Flota que todavía no están en la
+    //    hoja de Supervisiones
+    if (!f) {
       sinMatch.push({ concat: concat, cliente: cliente, movil: movil });
+      continue;
     }
+    supPorFlotaKey[(f.cliente + '|' + f.movil).toLowerCase()] = data;
 
-    const outKey = (outCliente + '|' + outMovil).toLowerCase();
+    const outKey = (f.cliente + '|' + f.movil).toLowerCase();
     if (filasSheetSeen[outKey]) continue;   // el mismo móvil no se lista dos veces
     filasSheetSeen[outKey] = true;
     filasSheet.push({
-      nombre: outNombre, cliente: outCliente, movil: outMovil,
+      nombre: f.nombre, cliente: f.cliente, movil: f.movil,
       meses: data.meses, total: data.total, mesesSup: data.mesesSup,
       meta: data.meta, pctMovil: data.pctMovil
     });
   }
 
-  // ---- Salida: SÓLO los móviles presentes en "Resumen Supervisiones" ----
-  // (antes se listaba TODA la Flota, por lo que cualquier cliente/móvil recién
-  //  agregado a la hoja Flota aparecía en Supervisiones como "sin funcionamiento
-  //  en el mes". Ahora la lista sale de la propia hoja de Supervisiones.)
+  // ── Recalcular los meses desde "BBDD Supervisiones" ─────────────────────────
+  // Las columnas de meses de "Resumen Supervisiones 2026" son fórmulas
+  // =SUMAPRODUCTO(...'BBDD Supervisiones'...). Google no las recalcula si nadie
+  // tiene el archivo abierto, así que getValues() puede leer valores viejos.
+  // Contamos los eventos crudos nosotros mismos → siempre coincide con la realidad.
+  let bbddDiag = { ok: false };
+  try {
+    const bbdd = ss.getSheetByName('BBDD Supervisiones');
+    if (bbdd) {
+      const bv = bbdd.getDataRange().getValues();
+      // Columnas C = "Concat" (Cliente + Móvil), D = Fecha — igual que las fórmulas
+      // SUMAPRODUCTO de Panel/Resumen. Se detecta por header con fallback a C/D.
+      let bIdxConcat = 2, bIdxFecha = 3, bHeaderRow = 0;
+      for (let r = 0; r < Math.min(bv.length, 8); r++) {
+        const hr = bv[r].map(c => normalize_(c));
+        const ci = hr.indexOf('concat');
+        let fi = hr.indexOf('fecha');
+        if (fi < 0) fi = hr.indexOf('fecha supervision');
+        if (fi < 0) fi = hr.indexOf('fecha de supervision');
+        if (ci >= 0 && fi >= 0) { bHeaderRow = r; bIdxConcat = ci; bIdxFecha = fi; break; }
+      }
+      const anioNum = parseInt((SUPERVISIONES_TAB.match(/\d{4}/) || [])[0] || '0', 10);
+      const countByKeyMonth = {};
+      let contadas = 0;
+      for (let i = bHeaderRow + 1; i < bv.length; i++) {
+        const key = normalize_(bv[i][bIdxConcat]);
+        if (!key) continue;
+        const fecha = parseFlexibleDate(bv[i][bIdxFecha]);
+        if (!fecha || isNaN(fecha.getTime())) continue;
+        if (anioNum && fecha.getFullYear() !== anioNum) continue;
+        if (!countByKeyMonth[key]) countByKeyMonth[key] = [0,0,0,0,0,0,0,0,0,0,0,0];
+        countByKeyMonth[key][fecha.getMonth()]++;
+        contadas++;
+      }
+      let aplicados = 0;
+      if (Object.keys(countByKeyMonth).length > 0) {
+        filasSheet.forEach(function(m) {
+          // Clave = identidad real del móvil (Cliente + Móvil de la Flota), NUNCA
+          // el "Concat" de la hoja resumen (puede venir de un cruce difuso errado).
+          const c = countByKeyMonth[normalize_(m.cliente + ' ' + m.movil)] ||
+                    countByKeyMonth[normalize_(m.nombre)];
+          if (!c) return;   // sin registros en BBDD → se conserva lo de la hoja resumen
+          const mm = {};
+          let tot = 0, nMeses = 0;
+          for (let j = 0; j < 12; j++) {
+            mm[meses[j]] = c[j];
+            tot += c[j];
+            if (c[j] > 0) nMeses++;
+          }
+          m.meses = mm;
+          m.total = tot;
+          m.mesesSup = nMeses;
+          m.pctMovil = m.meta > 0 ? nMeses / m.meta : 0;
+          aplicados++;
+        });
+      }
+      bbddDiag = { ok: true, contadas: contadas, claves: Object.keys(countByKeyMonth).length, aplicados: aplicados };
+    } else {
+      bbddDiag = { ok: false, motivo: 'tab BBDD Supervisiones no encontrada' };
+    }
+  } catch (e) {
+    bbddDiag = { ok: false, error: String(e) };
+    // "BBDD Supervisiones" no disponible → se usan los valores de "Resumen Supervisiones 2026"
+  }
+
+  // ---- Salida: móviles que están en "Resumen Supervisiones" Y en la Flota ----
   const moviles = filasSheet;
 
   return {
@@ -2984,7 +3046,8 @@ function readSupervisiones(flotaInfo) {
       cruzados: moviles.filter(m => m.total > 0 || m.meta > 0).length,
       sinCruce: moviles.filter(m => m.total === 0 && m.meta === 0).length,
       filasSupervisionesSinMatch: sinMatch.length,
-      modoHeaders: usingHeaders ? 'concat+cliente' : 'legacy-posicional'
+      modoHeaders: usingHeaders ? 'concat+cliente' : 'legacy-posicional',
+      bbdd: bbddDiag
     }
   };
 }
