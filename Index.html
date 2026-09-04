@@ -112,6 +112,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .badge-sinic{background:var(--surface-2);color:var(--text-3);border:0.5px solid var(--border)}
 .badge-teal{background:var(--teal-bg);color:var(--teal-fg)}
 .badge-reemplazo{background:#FFF3E0;color:#E65100}
+.badge-titular{background:#FFF8E1;color:#F57F17;border:0.5px solid #FFE082}
 .badge-doble{background:#FCE4EC;color:#C62828}
 .row-reemplazo-movil td{background:color-mix(in srgb,#FFF3E0 30%,transparent)}
 .rutas-chip{font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -835,8 +836,8 @@ th.fp-mes-actual,td.fp-mes-actual{background:var(--info-bg)}
           </div>
         </div>
         <div class="kpi info" id="cardSegundaRuta" data-kpi="op-encurso"><div class="kpi-label">Segunda ruta</div><div class="kpi-val" id="opEnCurso">—</div><div class="kpi-sub" id="opEnCursoSub">con segunda ruta hoy</div></div>
-        <div class="kpi warn" data-kpi="op-reemplazo"><div class="kpi-label">Reemplazo conductores</div><div class="kpi-val" id="opReemplazo">—</div><div class="kpi-sub" id="opReemplazoSub">—</div></div>
         <div class="kpi ok" data-kpi="op-doble" id="kpiDobleCard"><div class="kpi-label">Doble inicio s/término</div><div class="kpi-val" id="opDoble">—</div><div class="kpi-sub" id="opDobleSub">—</div></div>
+        <div class="kpi warn" id="kpiReemplazoCard" data-kpi="op-reemplazo"><div class="kpi-label">Reemplazo conductores</div><div class="kpi-val" id="opReemplazo">—</div><div class="kpi-sub" id="opReemplazoSub">—</div></div>
         <div class="kpi teal" data-kpi="op-atenc"><div class="kpi-label">Atenciones totales</div><div class="kpi-val" id="opAtenc">—</div><div class="kpi-sub" id="opAtencSub">—</div></div>
       </div>
       <div class="day-grid">
@@ -920,6 +921,7 @@ th.fp-mes-actual,td.fp-mes-actual{background:var(--info-bg)}
           <option value="sinInicio">Sin inicio</option>
           <option value="doble">Doble inicio</option>
           <option value="reemplazo">Reemplazo</option>
+          <option value="sugtitular">Titular de hecho</option>
         </select>
         <span class="fg-label">KAM</span>
         <select id="detKam"><option value="">Todos</option></select>
@@ -2088,8 +2090,9 @@ function _renderDetFiltered(todos) {
     if (ef === 'encurso')    { if (!(m.rutasEnCurso > 0)) return false; }
     else if (ef === 'terminado') { if (!(m.termino > 0 && !m.rutasEnCurso)) return false; }
     else if (ef === 'sinInicio') { if (m.inicio) return false; }
-    else if (ef === 'doble')     { if (!m.dobleInicioSinTermino) return false; }
-    else if (ef === 'reemplazo') { if (!m.tieneReemplazo) return false; }
+    else if (ef === 'doble')      { if (!m.dobleInicioSinTermino) return false; }
+    else if (ef === 'reemplazo')  { if (!m.tieneReemplazo) return false; }
+    else if (ef === 'sugtitular') { if (!m.sugerenciaTitular) return false; }
     if (buscar) {
       const txt = [m.nombre, m.movil, m.cliente, m.conductor, m.conductorTitular, m.kam, m.comuna, m.lugar].join(' ').toLowerCase();
       if (!txt.includes(buscar)) return false;
@@ -2117,6 +2120,7 @@ function _detBadgesHtml(m) {
   else if (est === 'iniciado') b.push('<span class="badge badge-teal">Iniciado</span>');
   else b.push('<span class="badge badge-sinic">Sin inicio</span>');
   if (m.tieneReemplazo)        b.push('<span class="badge badge-reemplazo">Conductor reemplazo</span>');
+  if (m.sugerenciaTitular)     b.push('<span class="badge badge-titular">★ Titular de hecho: '+escapeHtml(m.sugerenciaTitular.conductor)+' ('+m.sugerenciaTitular.rutas+' rutas)</span>');
   if (m.dobleInicioSinTermino) b.push('<span class="badge badge-doble">'+ICONS.alertTri+' Doble inicio</span>');
   return b.join(' ');
 }
@@ -2325,6 +2329,7 @@ function _gasAction_(source, params) {
     if (IS_GAS) {
       var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
       if (source === 'update_inicio') runner.updateInicioRuta(params.rowIdx, params.conductor, params.comuna, params.lugar);
+      else if (source === 'confirmar_titular') runner.confirmarTitularDeHecho(params.cliente, params.movil, params.conductor, params.rutas || '', params.desde || '', '');
       else runner.updateFlotaConductor(params.cliente, params.movil, params.conductor);
     } else {
       // Desde Vercel: fetch con no-cors para evitar bloqueo CORS en escrituras.
@@ -2336,6 +2341,33 @@ function _gasAction_(source, params) {
         .catch(reject);
     }
   });
+}
+
+// Confirma a un conductor de reemplazo como titular (desde el tooltip de la card Reemplazo)
+function confirmarTitular(cliente, movil, conductor, rutas, desde, btn) {
+  if (!cliente || !movil || !conductor) return;
+  if (!confirm('¿Poner a ' + conductor + ' como titular de ' + cliente + ' / ' + movil + '?\n\nSe actualizará la hoja Flota y quedará registrado en "Cambios de Titular".')) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+  _gasAction_('confirmar_titular', { cliente: cliente, movil: movil, conductor: conductor, rutas: rutas || '', desde: desde || '', token: (typeof sessionToken !== 'undefined' && sessionToken) ? sessionToken : '' })
+    .then(function() {
+      var uni = allData && allData.unificador;
+      var m = uni && (uni.moviles || []).find(function(x){ return x.cliente === cliente && x.movil === movil; });
+      if (m) {
+        m.conductorTitular = conductor;
+        m.conductor = conductor;
+        m.tieneReemplazo = false;
+        m.rachaReemplazo = null;
+        m.sugerenciaTitular = null;
+        (m.alertasInicio || []).forEach(function(a){ a.esReemplazo = false; });
+      }
+      var tipEl = document.getElementById('kpiTip'); if (tipEl) tipEl.style.display = 'none';
+      renderOperacion();
+      if (typeof _renderDetFiltered === 'function' && uni) _renderDetFiltered(uni.moviles || []);
+    })
+    .catch(function(err) {
+      alert('Error al confirmar titular: ' + (err && (err.message || err) || 'desconocido'));
+      if (btn) { btn.disabled = false; btn.textContent = 'Poner de titular'; }
+    });
 }
 
 function guardarDetEdit() {
@@ -2448,8 +2480,13 @@ function renderOperacion(){
   if(cardSR) cardSR.className='kpi '+(srSinIniciar.length>0?'warn':'info');
   document.getElementById('opEnCurso').textContent=srMoviles.length;
   document.getElementById('opEnCursoSub').textContent=srMoviles.length===0?'sin segunda ruta hoy':srSinIniciar.length>0?srSinIniciar.length+' sin iniciar':rutasEnCurso+' rutas activas';
-  document.getElementById('opReemplazo').textContent=movsConReemplazo;
-  document.getElementById('opReemplazoSub').textContent=movsConReemplazo>0?movsConReemplazo+' con reemplazo':'sin reemplazos';
+  // Card Reemplazo conductores — % de la flota con conductor de reemplazo (meta ≤10%)
+  var _pctReemplazo = total > 0 ? Math.round(movsConReemplazo / total * 100) : 0;
+  var _reempCard = document.getElementById('kpiReemplazoCard');
+  if(_reempCard) _reempCard.className = 'kpi ' + (_pctReemplazo > 10 ? 'danger' : 'ok');
+  document.getElementById('opReemplazo').textContent = _pctReemplazo + '%';
+  document.getElementById('opReemplazoSub').textContent =
+    movsConReemplazo + ' de ' + total + ' móviles · ' + (_pctReemplazo > 10 ? 'supera meta ≤10%' : 'meta ≤10%');
   const dobleCard=document.getElementById('kpiDobleCard');
   if(dobleCard) dobleCard.className='kpi '+(movsConDobleIni>0?'danger':'ok');
   document.getElementById('opDoble').textContent=movsConDobleIni;
@@ -2492,8 +2529,11 @@ function renderOperacion(){
   kpiTooltipContent['op-reemplazo']='<strong>Reemplazo conductores</strong><br><em style="color:var(--text-3);font-size:11px">Sin reemplazos hoy</em>';
   try {
     var reempMoviles2=moviles.filter(function(m){return m.tieneReemplazo;});
+    var _nSugTit=moviles.filter(function(m){return m.sugerenciaTitular;}).length;
     if(reempMoviles2.length>0){
-      var reempHtml='<strong style="display:block;margin-bottom:6px">'+reempMoviles2.length+' móvil'+(reempMoviles2.length!==1?'es':'')+' con conductor de reemplazo</strong>';
+      var reempHtml='<strong style="display:block;margin-bottom:2px">'+reempMoviles2.length+' móvil'+(reempMoviles2.length!==1?'es':'')+' con conductor de reemplazo</strong>'+
+        '<div style="font-size:11px;color:'+(_pctReemplazo>10?'var(--danger-fg)':'var(--text-3)')+'">'+_pctReemplazo+'% de la flota · meta ≤10%'+(_pctReemplazo>10?' — supera la meta':'')+'</div>'+
+        (_nSugTit>0?'<div style="font-size:11px;color:var(--warn-fg);margin-bottom:6px">★ '+_nSugTit+' con titular de hecho (≥22 rutas) — confirmá abajo</div>':'<div style="margin-bottom:6px"></div>');
       for(var ri=0;ri<reempMoviles2.length;ri++){
         var rm=reempMoviles2[ri];
         var reempConductor='';
@@ -2506,6 +2546,14 @@ function renderOperacion(){
         reempHtml+='<div><strong style="font-size:12px">'+escapeHtml(String(rm.cliente||''))+'</strong> <span style="color:var(--text-3);font-size:11px">'+escapeHtml(String(rm.movil||''))+'</span></div>';
         if(reempConductor) reempHtml+='<div style="font-size:11.5px;color:var(--ok-fg);font-weight:600">'+escapeHtml(reempConductor)+'</div>';
         if(reempA) reempHtml+='<div style="font-size:11px;color:var(--text-3)">reemplaza a '+escapeHtml(reempA)+'</div>';
+        var rr=rm.rachaReemplazo;
+        if(rr && rr.rutas>0){
+          var rrCol=rr.sugerido?'var(--warn-fg)':'var(--text-3)';
+          reempHtml+='<div style="font-size:11px;color:'+rrCol+';margin-top:3px">Racha: <strong>'+rr.rutas+' ruta'+(rr.rutas!==1?'s':'')+'</strong> desde '+escapeHtml(_fechaCorta_(rr.desde))
+            +(rr.sugerido?' · ≥22, sugerido titular':(rr.dominante?'':' · alternado'))+'</div>';
+          reempHtml+='<button class="tip-btn-titular" data-cli="'+escapeHtml(String(rm.cliente||''))+'" data-mov="'+escapeHtml(String(rm.movil||''))+'" data-cond="'+escapeHtml(rr.conductor||reempConductor)+'" data-rutas="'+rr.rutas+'" data-desde="'+escapeHtml(rr.desde||'')+'" '
+            +'style="margin-top:4px;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--border);cursor:pointer;background:'+(rr.sugerido?'var(--warn-bg)':'transparent')+';color:var(--text-1)">Poner de titular</button>';
+        }
         reempHtml+='</div>';
       }
       kpiTooltipContent['op-reemplazo']=reempHtml;
@@ -2725,6 +2773,7 @@ function renderMap(){
 }
 
 function escapeHtml(s){if(!s) return '';return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function _fechaCorta_(iso){var m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/);return m?m[3]+'/'+m[2]:String(iso||'');}
 
 function renderOpSidebar(data){
   const byC={};
@@ -4612,6 +4661,12 @@ function populateKamSelector(){
   tip.addEventListener('mouseleave',function(e){
     if(e.relatedTarget&&e.relatedTarget.closest&&e.relatedTarget.closest('[data-kpi]')) return;
     tip.style.display='none';_tipTarget=null;
+  });
+  tip.addEventListener('click',function(e){
+    var b=e.target.closest('.tip-btn-titular');
+    if(!b) return;
+    e.stopPropagation();
+    confirmarTitular(b.dataset.cli,b.dataset.mov,b.dataset.cond,b.dataset.rutas,b.dataset.desde,b);
   });
   document.addEventListener('mouseout',function(e){
     if(tip.contains(e.relatedTarget)) return; // mouse va al tooltip → no ocultar

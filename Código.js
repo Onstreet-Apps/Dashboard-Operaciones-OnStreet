@@ -258,6 +258,17 @@ function doGet(e) {
       const conductor = String(e.parameter.conductor || '');
       result = updateFlotaConductor(cliente, movil, conductor);
 
+    } else if (source === 'confirmar_titular') {
+      var ctUser = params.token ? verificarToken_(params.token) : null;
+      result = confirmarTitularDeHecho(
+        String(e.parameter.cliente   || ''),
+        String(e.parameter.movil     || ''),
+        String(e.parameter.conductor || ''),
+        String(e.parameter.rutas     || ''),
+        String(e.parameter.desde     || ''),
+        ctUser ? (ctUser.nombre || ctUser.email || '') : ''
+      );
+
     } else if (source === 'reporte_perdida_ruta') {
       const cliente     = String(e.parameter.cliente     || '');
       const fechaInicio = String(e.parameter.fechaInicio || '');
@@ -1957,6 +1968,10 @@ function readUnificador(flotaInfo, fechaParam) {
     indicadores: 'Indicadores', comuna: 'Comuna'
   });
 
+  // Historial de inicios (para detectar "titular de hecho": un reemplazo con racha larga)
+  let histInicios = {};
+  try { histInicios = readHistorialInicios_(ss, today, 200); } catch (e) { histInicios = {}; }
+
   // Agrupar por móvil (un móvil puede tener varios inicios y términos en el mismo día)
   const iniciosPorMovil = {};
   const terminosPorMovil = {};
@@ -2040,6 +2055,12 @@ function readUnificador(flotaInfo, fechaParam) {
       .map(function(k){ return { key: k, value: breakdownAcc[k] }; })
       .sort(function(a, b){ return b.value - a.value; });
 
+    // ─── "Titular de hecho": racha de un conductor de reemplazo ───
+    const rachaReemplazo = calcularRachaReemplazo_(histInicios[key] || [], f.conductor || '');
+    const sugerenciaTitular = (rachaReemplazo && rachaReemplazo.sugerido)
+      ? { conductor: rachaReemplazo.conductor, rutas: rachaReemplazo.rutas, desde: rachaReemplazo.desde }
+      : null;
+
     const conductorActual = cantInicios > 0 ? inisArr[cantInicios - 1].conductor :
                             (cantTerminos > 0 ? tersArr[cantTerminos - 1].conductor : f.conductor);
     const horaPrimerInicio = cantInicios > 0 ? inisArr[0].hora : '';
@@ -2067,6 +2088,8 @@ function readUnificador(flotaInfo, fechaParam) {
       // Alertas
       alertasInicio: alertasInicio,
       tieneReemplazo: tieneReemplazo,
+      rachaReemplazo: rachaReemplazo,
+      sugerenciaTitular: sugerenciaTitular,
       dobleInicioSinTermino: dobleInicioSinTermino,
       multiplesRutas: cantInicios > 1,
 
@@ -2272,6 +2295,103 @@ function readRouteEvents(ss, sheetName, targetDate, colMap) {
     eventos.push(evt);
   }
   return eventos;
+}
+
+// Nombres de conductor que no son una persona real (no pueden ser "titular de hecho")
+function esConductorValido_(c) {
+  const n = normalize_(c);
+  if (!n) return false;
+  return ['otro', 'otros', 'n/a', 'na', 's/i', 'si', 'sin conductor', 'sin informacion',
+          'conductor', 'reemplazo', 'pendiente', '-', '.', 'x'].indexOf(n) < 0;
+}
+
+// Historial de "quién manejó cada móvil cada día" en los últimos `dias` días.
+// Fuente principal: archivo "Finalizados" (SHEETS.finalizados) — acumula histórico.
+// Se completa con "Inicio de Ruta" en vivo para los días que aún no se archivaron.
+// Devuelve, por móvil, [{ f: Date, c: conductor }] con UNA entrada por día,
+// ordenada del más reciente al más viejo. Para detectar "titular de hecho".
+function readHistorialInicios_(ss, hastaFecha, dias) {
+  ss = ss || SpreadsheetApp.openById(SHEETS.unificador);
+  const corte = new Date(hastaFecha ? hastaFecha.getTime() : Date.now());
+  corte.setHours(0, 0, 0, 0);
+  corte.setDate(corte.getDate() - (dias || 200));
+
+  // porMovil[key][fechaISO] = conductor (primer registro del día gana)
+  const porMovil = {};
+  function add_(cliente, movil, fecha, cond) {
+    if (!cliente || !movil || !cond) return;
+    if (!fecha || isNaN(fecha.getTime()) || fecha < corte) return;
+    const key = normalize_(cliente) + '|' + normalize_(movil);
+    const fiso = formatDateISO(fecha);
+    if (!porMovil[key]) porMovil[key] = {};
+    if (!(fiso in porMovil[key])) porMovil[key][fiso] = String(cond).trim();
+  }
+  function scan_(sheet, cols) {
+    if (!sheet) return;
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    const values = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+    const hN = values[0].map(function(h){ return normalize_(h); });
+    function idx_(names){ for (var i = 0; i < names.length; i++){ var k = hN.indexOf(normalize_(names[i])); if (k >= 0) return k; } return -1; }
+    const iF = idx_(cols.fecha), iC = idx_(cols.cliente), iM = idx_(cols.movil), iK = idx_(cols.conductor);
+    if (iF < 0 || iC < 0 || iM < 0 || iK < 0) return;
+    for (var i = 1; i < values.length; i++) {
+      add_(String(values[i][iC] || '').trim(), String(values[i][iM] || '').trim(),
+           parseFlexibleDate(values[i][iF]), String(values[i][iK] || '').trim());
+    }
+  }
+
+  // 1) Archivo histórico
+  try {
+    const finSS = SpreadsheetApp.openById(SHEETS.finalizados);
+    scan_(finSS.getSheetByName('Finalizados') || finSS.getSheets()[0],
+          { fecha: ['Fecha'], cliente: ['Cliente'], movil: ['Notacion', 'Notación', 'Móvil', 'Movil'], conductor: ['Conductor', 'Nombre Conductor'] });
+  } catch (e) { /* seguir con lo que haya */ }
+
+  // 2) Días recientes aún no archivados
+  scan_(ss.getSheetByName('Inicio de Ruta'),
+        { fecha: ['Fecha'], cliente: ['Cliente'], movil: ['Móvil', 'Movil'], conductor: ['Nombre Conductor', 'Conductor'] });
+
+  const hist = {};
+  Object.keys(porMovil).forEach(function(key){
+    hist[key] = Object.keys(porMovil[key])
+      .map(function(fiso){ return { f: parseFlexibleDate(fiso), c: porMovil[key][fiso] }; })
+      .sort(function(a, b){ return b.f - a.f; });
+  });
+  return hist;
+}
+
+// Dado el historial de inicios de un móvil y su titular, calcula la "racha" de
+// reemplazo: inicios consecutivos (desde el más reciente) de conductores != titular,
+// cortando en cuanto reaparece el titular. Devuelve null si no hay racha.
+function calcularRachaReemplazo_(evs, titular) {
+  const titN = normalize_(titular || '');
+  if (!titN || !evs || evs.length === 0) return null;
+  const racha = [];
+  for (let x = 0; x < evs.length; x++) {
+    if (normalize_(evs[x].c) === titN) break;   // titular manejó → corta (regla: 1 vez reinicia)
+    racha.push(evs[x]);
+  }
+  if (racha.length === 0) return null;
+  const porCond = {};
+  racha.forEach(function(e){
+    if (!esConductorValido_(e.c)) return;   // "Otro", "S/I", etc. no pueden ser titular
+    const n = normalize_(e.c);
+    if (!porCond[n]) porCond[n] = { nombre: e.c, k: 0 };
+    porCond[n].k++;
+  });
+  let dom = null;
+  Object.keys(porCond).forEach(function(n){ if (!dom || porCond[n].k > dom.k) dom = porCond[n]; });
+  if (!dom) return null;   // la racha es solo de conductores sin identificar
+  const dominante = dom.k >= racha.length * 0.8;
+  return {
+    conductor:  dom.nombre,
+    rutas:      dom.k,
+    rachaTotal: racha.length,
+    desde:      formatDateISO(racha[racha.length - 1].f),
+    dominante:  dominante,
+    sugerido:   dominante && dom.k >= 22   // umbral: 22 rutas
+  };
 }
 
 // ============================================================================
@@ -3334,6 +3454,53 @@ function updateFlotaConductor(cliente, movil, newConductor) {
     }
   }
   throw new Error('Móvil no encontrado en Flota: ' + cliente + ' / ' + movil);
+}
+
+// Confirma a un conductor de reemplazo como titular: reescribe la hoja Flota y
+// deja registro en la hoja de auditoría "Cambios de Titular".
+function confirmarTitularDeHecho(cliente, movil, conductor, rutas, desde, usuario) {
+  if (!cliente || !movil || !conductor) throw new Error('Faltan datos (cliente / móvil / conductor)');
+  const ss = SpreadsheetApp.openById(SHEETS.unificador);
+  const flotaSheet = ss.getSheetByName('Flota');
+  if (!flotaSheet) throw new Error('Hoja "Flota" no encontrada');
+
+  // Titular anterior (para el registro)
+  const fv = flotaSheet.getDataRange().getValues();
+  const fh = fv[0].map(function(h){ return normalize_(h); });
+  const ci = fh.indexOf('cliente');
+  const mi = fh.indexOf('movil');
+  let ki = fh.indexOf('conductor');
+  if (ki < 0) ki = fh.indexOf('nombre conductor');
+  let anterior = '';
+  if (ci >= 0 && mi >= 0 && ki >= 0) {
+    for (var i = 1; i < fv.length; i++) {
+      if (normalize_(String(fv[i][ci] || '')) === normalize_(cliente) &&
+          normalize_(String(fv[i][mi] || '')) === normalize_(movil)) {
+        anterior = String(fv[i][ki] || '').trim();
+        break;
+      }
+    }
+  }
+
+  updateFlotaConductor(cliente, movil, conductor);
+  registrarCambioTitular_(cliente, movil, anterior, conductor, rutas, desde, usuario);
+  return { ok: true, anterior: anterior };
+}
+
+function registrarCambioTitular_(cliente, movil, anterior, nuevo, rutas, desde, usuario) {
+  try {
+    const ss = SpreadsheetApp.openById(SHEETS.unificador);
+    let sh = ss.getSheetByName('Cambios de Titular');
+    if (!sh) {
+      sh = ss.insertSheet('Cambios de Titular');
+      sh.appendRow(['Fecha', 'Cliente', 'Móvil', 'Titular anterior', 'Titular nuevo', 'Rutas racha', 'Desde', 'Confirmado por']);
+      sh.getRange(1, 1, 1, 8).setFontWeight('bold');
+    }
+    sh.appendRow([new Date(), cliente, movil, anterior, nuevo, rutas || '', desde || '', usuario || '']);
+  } catch (err) {
+    // El registro de auditoría no debe romper la confirmación
+    Logger.log('registrarCambioTitular_ error: ' + err);
+  }
 }
 
 function clearWriteCaches_() {
