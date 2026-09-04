@@ -1968,7 +1968,7 @@ function readUnificador(flotaInfo, fechaParam) {
     indicadores: 'Indicadores', comuna: 'Comuna'
   });
 
-  // Historial de inicios (para detectar "titular de hecho": un reemplazo con racha larga)
+  // Historial de inicios (para sugerir titular: un reemplazo con racha larga)
   let histInicios = {};
   try { histInicios = readHistorialInicios_(ss, today, 200); } catch (e) { histInicios = {}; }
 
@@ -2055,7 +2055,7 @@ function readUnificador(flotaInfo, fechaParam) {
       .map(function(k){ return { key: k, value: breakdownAcc[k] }; })
       .sort(function(a, b){ return b.value - a.value; });
 
-    // ─── "Titular de hecho": racha de un conductor de reemplazo ───
+    // ─── Titular sugerido: racha de un conductor de reemplazo ───
     const rachaReemplazo = calcularRachaReemplazo_(histInicios[key] || [], f.conductor || '');
     const sugerenciaTitular = (rachaReemplazo && rachaReemplazo.sugerido)
       ? { conductor: rachaReemplazo.conductor, rutas: rachaReemplazo.rutas, desde: rachaReemplazo.desde }
@@ -2297,7 +2297,7 @@ function readRouteEvents(ss, sheetName, targetDate, colMap) {
   return eventos;
 }
 
-// Nombres de conductor que no son una persona real (no pueden ser "titular de hecho")
+// Nombres de conductor que no son una persona real (no pueden ser titular sugerido)
 function esConductorValido_(c) {
   const n = normalize_(c);
   if (!n) return false;
@@ -2309,7 +2309,7 @@ function esConductorValido_(c) {
 // Fuente principal: archivo "Finalizados" (SHEETS.finalizados) — acumula histórico.
 // Se completa con "Inicio de Ruta" en vivo para los días que aún no se archivaron.
 // Devuelve, por móvil, [{ f: Date, c: conductor }] con UNA entrada por día,
-// ordenada del más reciente al más viejo. Para detectar "titular de hecho".
+// ordenada del más reciente al más viejo. Para sugerir titular.
 function readHistorialInicios_(ss, hastaFecha, dias) {
   ss = ss || SpreadsheetApp.openById(SHEETS.unificador);
   const corte = new Date(hastaFecha ? hastaFecha.getTime() : Date.now());

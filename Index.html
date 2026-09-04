@@ -921,7 +921,7 @@ th.fp-mes-actual,td.fp-mes-actual{background:var(--info-bg)}
           <option value="sinInicio">Sin inicio</option>
           <option value="doble">Doble inicio</option>
           <option value="reemplazo">Reemplazo</option>
-          <option value="sugtitular">Titular de hecho</option>
+          <option value="sugtitular">Titular sugerido</option>
         </select>
         <span class="fg-label">KAM</span>
         <select id="detKam"><option value="">Todos</option></select>
@@ -2120,7 +2120,7 @@ function _detBadgesHtml(m) {
   else if (est === 'iniciado') b.push('<span class="badge badge-teal">Iniciado</span>');
   else b.push('<span class="badge badge-sinic">Sin inicio</span>');
   if (m.tieneReemplazo)        b.push('<span class="badge badge-reemplazo">Conductor reemplazo</span>');
-  if (m.sugerenciaTitular)     b.push('<span class="badge badge-titular">★ Titular de hecho: '+escapeHtml(m.sugerenciaTitular.conductor)+' ('+m.sugerenciaTitular.rutas+' rutas)</span>');
+  if (m.sugerenciaTitular)     b.push('<span class="badge badge-titular">★ Titular sugerido: '+escapeHtml(m.sugerenciaTitular.conductor)+' ('+m.sugerenciaTitular.rutas+' rutas)</span>');
   if (m.dobleInicioSinTermino) b.push('<span class="badge badge-doble">'+ICONS.alertTri+' Doble inicio</span>');
   return b.join(' ');
 }
@@ -2533,7 +2533,7 @@ function renderOperacion(){
     if(reempMoviles2.length>0){
       var reempHtml='<strong style="display:block;margin-bottom:2px">'+reempMoviles2.length+' móvil'+(reempMoviles2.length!==1?'es':'')+' con conductor de reemplazo</strong>'+
         '<div style="font-size:11px;color:'+(_pctReemplazo>10?'var(--danger-fg)':'var(--text-3)')+'">'+_pctReemplazo+'% de la flota · meta ≤10%'+(_pctReemplazo>10?' — supera la meta':'')+'</div>'+
-        (_nSugTit>0?'<div style="font-size:11px;color:var(--warn-fg);margin-bottom:6px">★ '+_nSugTit+' con titular de hecho (≥22 rutas) — confirmá abajo</div>':'<div style="margin-bottom:6px"></div>');
+        (_nSugTit>0?'<div style="font-size:11px;color:var(--warn-fg);margin-bottom:6px">★ '+_nSugTit+' con titular sugerido (≥22 rutas) — confirmá abajo</div>':'<div style="margin-bottom:6px"></div>');
       for(var ri=0;ri<reempMoviles2.length;ri++){
         var rm=reempMoviles2[ri];
         var reempConductor='';
@@ -2550,7 +2550,7 @@ function renderOperacion(){
         if(rr && rr.rutas>0){
           var rrCol=rr.sugerido?'var(--warn-fg)':'var(--text-3)';
           reempHtml+='<div style="font-size:11px;color:'+rrCol+';margin-top:3px">Racha: <strong>'+rr.rutas+' ruta'+(rr.rutas!==1?'s':'')+'</strong> desde '+escapeHtml(_fechaCorta_(rr.desde))
-            +(rr.sugerido?' · ≥22, sugerido titular':(rr.dominante?'':' · alternado'))+'</div>';
+            +(rr.sugerido?' · ≥22, titular sugerido':(rr.dominante?'':' · alternado'))+'</div>';
           reempHtml+='<button class="tip-btn-titular" data-cli="'+escapeHtml(String(rm.cliente||''))+'" data-mov="'+escapeHtml(String(rm.movil||''))+'" data-cond="'+escapeHtml(rr.conductor||reempConductor)+'" data-rutas="'+rr.rutas+'" data-desde="'+escapeHtml(rr.desde||'')+'" '
             +'style="margin-top:4px;font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--border);cursor:pointer;background:'+(rr.sugerido?'var(--warn-bg)':'transparent')+';color:var(--text-1)">Poner de titular</button>';
         }
