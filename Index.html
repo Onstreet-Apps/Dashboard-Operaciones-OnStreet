@@ -2533,7 +2533,7 @@ function renderOperacion(){
     if(reempMoviles2.length>0){
       var reempHtml='<strong style="display:block;margin-bottom:2px">'+reempMoviles2.length+' móvil'+(reempMoviles2.length!==1?'es':'')+' con conductor de reemplazo</strong>'+
         '<div style="font-size:11px;color:'+(_pctReemplazo>10?'var(--danger-fg)':'var(--text-3)')+'">'+_pctReemplazo+'% de la flota · meta ≤10%'+(_pctReemplazo>10?' — supera la meta':'')+'</div>'+
-        (_nSugTit>0?'<div style="font-size:11px;color:var(--warn-fg);margin-bottom:6px">★ '+_nSugTit+' con titular sugerido (≥22 rutas) — confirmá abajo</div>':'<div style="margin-bottom:6px"></div>');
+        (_nSugTit>0?'<div style="font-size:11px;color:var(--warn-fg);margin-bottom:6px">★ '+_nSugTit+' con titular sugerido (≥22 rutas) — confírmalo abajo</div>':'<div style="margin-bottom:6px"></div>');
       for(var ri=0;ri<reempMoviles2.length;ri++){
         var rm=reempMoviles2[ri];
         var reempConductor='';
@@ -4186,7 +4186,7 @@ function renderKilometros(){
   if(!km){
     ['kmRankingHoy','kmRankingMes','kmClienteHoy','kmKamHoy','kmClienteMes','kmSinRegistros','kmDiagnostico'].forEach(function(id){
       var el=document.getElementById(id);
-      if(el) el.innerHTML='<div class="empty" style="padding:24px 0">Sin datos de km — asegurate de usar el Apps Script v20 (con readKilometros).</div>';
+      if(el) el.innerHTML='<div class="empty" style="padding:24px 0">Sin datos de km — asegúrate de usar el Apps Script v20 (con readKilometros).</div>';
     });
     return;
   }
