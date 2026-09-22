@@ -4725,10 +4725,24 @@ function authClearError(prefix) {
   el.classList.remove('visible');
 }
 
-function authFetch(source, queryParams) {
+function authFetch(source, queryParams, _isRetry) {
   var url = GAS_API_URL + '?source=' + source;
   Object.keys(queryParams).forEach(function(k) { if(queryParams[k]!=null) url += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(queryParams[k]); });
-  return fetch(url).then(function(r) { return r.json(); });
+  return fetch(url)
+    .then(function(r) { return r.text(); })
+    .then(function(text) {
+      try { return JSON.parse(text); }
+      catch (e) { throw new Error('respuesta_invalida'); }
+    })
+    .catch(function(err) {
+      // Primer intento fallido (red caída, o el servidor devolvió HTML en vez de JSON,
+      // típico de un arranque en frío de Apps Script): esperar y reintentar una vez.
+      if (!_isRetry) {
+        return new Promise(function(resolve) { setTimeout(resolve, 1200); })
+          .then(function() { return authFetch(source, queryParams, true); });
+      }
+      throw new Error('No se pudo conectar con el servidor. Revisa tu conexión e intenta de nuevo.');
+    });
 }
 
 function doLogin() {
@@ -4751,7 +4765,7 @@ function doLogin() {
   };
   var onErr = function(err) {
     btn.disabled = false; btn.textContent = 'Entrar';
-    authSetError('login', 'Error: ' + (err && err.message ? err.message : String(err)));
+    authSetError('login', (err && err.message) || 'Ocurrió un error inesperado. Intenta de nuevo.');
   };
   if (IS_GAS) {
     google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).iniciarSesion(email, pass);
@@ -4779,7 +4793,7 @@ function doRegister() {
   };
   var onErr = function(err) {
     btn.disabled = false; btn.textContent = 'Solicitar acceso';
-    authSetError('register', 'Error: ' + (err && err.message ? err.message : String(err)));
+    authSetError('register', (err && err.message) || 'Ocurrió un error inesperado. Intenta de nuevo.');
   };
   if (IS_GAS) {
     google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).registrarUsuario(nombre, email, pass);
