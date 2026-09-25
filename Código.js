@@ -269,6 +269,26 @@ function doGet(e) {
         ctUser ? (ctUser.nombre || ctUser.email || '') : ''
       );
 
+    } else if (source === 'alta_movil') {
+      var amUser = verificarToken_(params.token || null);
+      if (!amUser) { result = { error: 'token_invalido' }; }
+      else {
+        result = altaMovil({
+          cliente: e.parameter.cliente, movil: e.parameter.movil,
+          sucursal: e.parameter.sucursal, kam: e.parameter.kam,
+          conductor: e.parameter.conductor, fechaInicio: e.parameter.fechaInicio
+        });
+      }
+
+    } else if (source === 'baja_movil') {
+      var bmUser = verificarToken_(params.token || null);
+      if (!bmUser) { result = { error: 'token_invalido' }; }
+      else {
+        result = bajaMovil({
+          movilId: e.parameter.movilId, fechaTermino: e.parameter.fechaTermino
+        });
+      }
+
     } else if (source === 'reporte_perdida_ruta') {
       const cliente     = String(e.parameter.cliente     || '');
       const fechaInicio = String(e.parameter.fechaInicio || '');
@@ -3501,6 +3521,109 @@ function registrarCambioTitular_(cliente, movil, anterior, nuevo, rutas, desde, 
     // El registro de auditoría no debe romper la confirmación
     Logger.log('registrarCambioTitular_ error: ' + err);
   }
+}
+
+// ============================================================================
+// SUPABASE — moviles / movil_periodos_operacion (migración de Flota + Base)
+// ============================================================================
+
+function supabaseConfig_() {
+  const props = PropertiesService.getScriptProperties();
+  const url = props.getProperty('SUPABASE_URL');
+  const key = props.getProperty('SUPABASE_SERVICE_KEY');
+  if (!url || !key) throw new Error('Faltan SUPABASE_URL / SUPABASE_SERVICE_KEY en Propiedades del script');
+  return { url: url, key: key };
+}
+
+// Llama a una función Postgres expuesta como RPC (POST /rest/v1/rpc/<fn>).
+// Usa la service key: se salta RLS a propósito, igual que hoy SpreadsheetApp
+// tiene acceso total a las planillas — Apps Script es el backend de confianza.
+function supabaseRpc_(fnName, args) {
+  const cfg = supabaseConfig_();
+  const resp = UrlFetchApp.fetch(cfg.url + '/rest/v1/rpc/' + fnName, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key },
+    payload: JSON.stringify(args),
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  const body = resp.getContentText();
+  let data = null;
+  try { data = body ? JSON.parse(body) : null; } catch (e) { /* respuesta no-JSON */ }
+  if (code >= 400) {
+    const msg = (data && (data.message || data.hint)) || body || ('HTTP ' + code);
+    throw new Error('Supabase (' + fnName + '): ' + msg);
+  }
+  return data;
+}
+
+// Callable desde google.script.run y desde doGet source=alta_movil
+function altaMovil(params) {
+  if (!params) throw new Error('Faltan datos');
+  const cliente = String(params.cliente || '').trim();
+  const movil = String(params.movil || '').trim();
+  const fechaInicio = String(params.fechaInicio || '').trim(); // 'YYYY-MM-DD'
+  if (!cliente || !movil) throw new Error('Faltan Cliente / Móvil');
+  if (!fechaInicio) throw new Error('Falta la fecha de inicio de operación');
+
+  const movilCreado = supabaseRpc_('alta_movil', {
+    p_cliente: cliente,
+    p_movil: movil,
+    p_sucursal: String(params.sucursal || ''),
+    p_kam: String(params.kam || ''),
+    p_conductor: String(params.conductor || ''),
+    p_fecha_inicio: fechaInicio
+  });
+
+  return { ok: true, movil: movilCreado };
+}
+
+// Callable desde google.script.run y desde doGet source=baja_movil
+function bajaMovil(params) {
+  if (!params) throw new Error('Faltan datos');
+  const movilId = String(params.movilId || '').trim();
+  const fechaTermino = String(params.fechaTermino || '').trim();
+  if (!movilId) throw new Error('Falta el id del móvil');
+  if (!fechaTermino) throw new Error('Falta la fecha de término');
+
+  const movilActualizado = supabaseRpc_('baja_movil', {
+    p_movil_id: movilId,
+    p_fecha_termino: fechaTermino
+  });
+
+  return { ok: true, movil: movilActualizado };
+}
+
+// Corre esto UNA VEZ desde el editor de Apps Script (Ejecutar) para probar
+// que Supabase está bien conectado, sin dejar datos de prueba en la tabla.
+function testAltaBajaMovil() {
+  const movil = 'TEST-' + new Date().getTime();
+
+  Logger.log('--- Alta ---');
+  const alta = altaMovil({
+    cliente: 'PRUEBA', movil: movil,
+    sucursal: 'Santiago', kam: 'Prueba QA', conductor: 'Conductor Prueba',
+    fechaInicio: formatDateISO(new Date())
+  });
+  Logger.log(JSON.stringify(alta));
+
+  const movilId = alta.movil && alta.movil.id;
+  if (!movilId) { Logger.log('❌ No se obtuvo id del móvil, revisar el error de arriba.'); return; }
+
+  Logger.log('--- Baja ---');
+  const baja = bajaMovil({ movilId: movilId, fechaTermino: formatDateISO(new Date()) });
+  Logger.log(JSON.stringify(baja));
+
+  Logger.log('--- Limpieza (borrando la fila de prueba) ---');
+  const cfg = supabaseConfig_();
+  const del = UrlFetchApp.fetch(cfg.url + '/rest/v1/moviles?id=eq.' + movilId, {
+    method: 'delete',
+    headers: { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key },
+    muteHttpExceptions: true
+  });
+  Logger.log('Delete status: ' + del.getResponseCode());
+  Logger.log('✅ Prueba terminada. Revisa arriba que "Alta" y "Baja" tengan ok:true.');
 }
 
 function clearWriteCaches_() {
