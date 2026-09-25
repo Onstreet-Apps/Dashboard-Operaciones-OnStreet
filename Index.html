@@ -1422,6 +1422,7 @@ th.fp-mes-actual,td.fp-mes-actual{background:var(--info-bg)}
     <div class="subtabs">
       <button class="subtab active" onclick="switchSubtab(event,'fp-consolidado')">Consolidado</button>
       <button class="subtab" onclick="switchSubtab(event,'fp-potenciales')">Clientes potenciales</button>
+      <button class="subtab" onclick="switchSubtab(event,'fp-altabaja')">Alta / Baja de Móvil</button>
     </div>
 
     <div class="subtab-content active" id="sub-fp-consolidado">
@@ -1462,6 +1463,39 @@ th.fp-mes-actual,td.fp-mes-actual{background:var(--info-bg)}
           <input id="fpPotNuevoNombre" placeholder="Nombre del nuevo cliente potencial..." style="flex:1;font-size:13px;padding:8px 11px;border-radius:8px;border:0.5px solid var(--border-2);background:var(--surface);color:var(--text);font-family:inherit" onkeydown="if(event.key==='Enter'){event.preventDefault();fpAgregarPotencial();}" />
           <button type="button" class="btn-refresh" onclick="fpAgregarPotencial()">+ Agregar</button>
         </div>
+      </div>
+    </div>
+
+    <div class="subtab-content" id="sub-fp-altabaja">
+      <div class="panel" style="margin-bottom:14px">
+        <h2>Dar de alta un móvil nuevo</h2>
+        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:12px">Se registra a la vez en Flota y en su período de operación — no hace falta editar nada más por separado.</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:12px">
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Cliente</label><input id="abAltaCliente" style="width:100%" /></div>
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Móvil / Patente</label><input id="abAltaMovil" style="width:100%" /></div>
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Sucursal</label><input id="abAltaSucursal" style="width:100%" /></div>
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">KAM</label><input id="abAltaKam" style="width:100%" /></div>
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Conductor</label><input id="abAltaConductor" style="width:100%" /></div>
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Fecha de inicio de operación</label><input type="date" id="abAltaFecha" style="width:100%" /></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button type="button" class="btn-refresh" id="abAltaBtn" style="background:var(--info-fg);color:#fff;border-color:var(--info-fg)" onclick="fpAltaMovil()">Dar de alta</button>
+        </div>
+        <div id="abAltaError" style="display:none;color:var(--danger-fg);font-size:12.5px;margin-top:8px"></div>
+        <div id="abAltaOk" style="display:none;color:var(--ok-fg);font-size:12.5px;margin-top:8px"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Dar de baja un móvil</h2>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Móvil</label><select id="abBajaMovil" style="width:100%"><option value="">Cargando...</option></select></div>
+          <div><label style="display:block;font-size:11px;color:var(--text-2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Fecha de término</label><input type="date" id="abBajaFecha" style="width:100%" /></div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button type="button" class="btn-refresh" id="abBajaBtn" style="background:var(--danger-fg);color:#fff;border-color:var(--danger-fg)" onclick="fpBajaMovil()">Dar de baja</button>
+        </div>
+        <div id="abBajaError" style="display:none;color:var(--danger-fg);font-size:12.5px;margin-top:8px"></div>
+        <div id="abBajaOk" style="display:none;color:var(--ok-fg);font-size:12.5px;margin-top:8px"></div>
       </div>
     </div>
   </div>
@@ -1808,6 +1842,9 @@ function fpRunOrFetch_(source, params, onOk){
     else if(source==='flota_potencial_update') call.actualizarFlotaPotencial(params);
     else if(source==='flota_potencial_add') call.agregarFlotaPotencial(params);
     else if(source==='flota_potencial_delete') call.eliminarFlotaPotencial(params);
+    else if(source==='alta_movil') call.altaMovil(params);
+    else if(source==='baja_movil') call.bajaMovil(params);
+    else if(source==='moviles_activos') call.listarMovilesActivos(params);
   } else {
     const qs=Object.keys(params).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k]==null?'':params[k])).join('&');
     fetch(GAS_API_URL+'?source='+source+'&'+qs).then(function(r){return r.json();}).then(onOk).catch(function(){});
@@ -2028,6 +2065,83 @@ function fpAgregarPotencial(){
   });
 }
 
+var _abMovilesCargados=false;
+
+function fpCargarMovilesActivos(){
+  const sel=document.getElementById('abBajaMovil');
+  fpRunOrFetch_('moviles_activos',{token:sessionToken},function(d){
+    _abMovilesCargados=true;
+    if(!d||d.error||!d.moviles){ sel.innerHTML='<option value="">No se pudo cargar</option>'; return; }
+    if(!d.moviles.length){ sel.innerHTML='<option value="">Sin móviles activos</option>'; return; }
+    sel.innerHTML='<option value="">Selecciona un móvil...</option>'+d.moviles.map(function(m){
+      const label=escapeHtml(m.cliente+' '+m.movil+(m.conductor_actual?' — '+m.conductor_actual:''));
+      return '<option value="'+m.id+'">'+label+'</option>';
+    }).join('');
+  });
+}
+
+function fpAltaMovil(){
+  const cliente=document.getElementById('abAltaCliente').value.trim();
+  const movil=document.getElementById('abAltaMovil').value.trim();
+  const sucursal=document.getElementById('abAltaSucursal').value.trim();
+  const kam=document.getElementById('abAltaKam').value.trim();
+  const conductor=document.getElementById('abAltaConductor').value.trim();
+  const fechaInicio=document.getElementById('abAltaFecha').value;
+  const errEl=document.getElementById('abAltaError'), okEl=document.getElementById('abAltaOk');
+  errEl.style.display='none'; okEl.style.display='none';
+
+  if(!cliente||!movil||!fechaInicio){
+    errEl.textContent='Completa al menos Cliente, Móvil y Fecha de inicio.';
+    errEl.style.display='block';
+    return;
+  }
+
+  const btn=document.getElementById('abAltaBtn');
+  btn.disabled=true; btn.textContent='Guardando...';
+  fpRunOrFetch_('alta_movil',{token:sessionToken,cliente:cliente,movil:movil,sucursal:sucursal,kam:kam,conductor:conductor,fechaInicio:fechaInicio},function(d){
+    btn.disabled=false; btn.textContent='Dar de alta';
+    if(!d||d.error||!d.ok){
+      errEl.textContent='No se pudo dar de alta. '+((d&&d.error)||'Intenta de nuevo.');
+      errEl.style.display='block';
+      return;
+    }
+    okEl.textContent='Móvil dado de alta: '+cliente+' '+movil+'.';
+    okEl.style.display='block';
+    ['abAltaCliente','abAltaMovil','abAltaSucursal','abAltaKam','abAltaConductor','abAltaFecha'].forEach(function(id){ document.getElementById(id).value=''; });
+    _abMovilesCargados=false; // recién dado de alta: refrescar el selector de Baja la próxima vez que se abra
+  });
+}
+
+function fpBajaMovil(){
+  const movilId=document.getElementById('abBajaMovil').value;
+  const fechaTermino=document.getElementById('abBajaFecha').value;
+  const errEl=document.getElementById('abBajaError'), okEl=document.getElementById('abBajaOk');
+  errEl.style.display='none'; okEl.style.display='none';
+
+  if(!movilId||!fechaTermino){
+    errEl.textContent='Selecciona un móvil y la fecha de término.';
+    errEl.style.display='block';
+    return;
+  }
+  if(!confirm('¿Dar de baja este móvil? Esta acción no se puede deshacer.')) return;
+
+  const btn=document.getElementById('abBajaBtn');
+  btn.disabled=true; btn.textContent='Guardando...';
+  fpRunOrFetch_('baja_movil',{token:sessionToken,movilId:movilId,fechaTermino:fechaTermino},function(d){
+    btn.disabled=false; btn.textContent='Dar de baja';
+    if(!d||d.error||!d.ok){
+      errEl.textContent='No se pudo dar de baja. '+((d&&d.error)||'Intenta de nuevo.');
+      errEl.style.display='block';
+      return;
+    }
+    okEl.textContent='Móvil dado de baja correctamente.';
+    okEl.style.display='block';
+    document.getElementById('abBajaFecha').value='';
+    _abMovilesCargados=false;
+    fpCargarMovilesActivos(); // sacarlo de la lista de activos
+  });
+}
+
 function switchSubtab(ev,name){
   const wrap=ev.target.parentElement;
   wrap.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));
@@ -2035,6 +2149,7 @@ function switchSubtab(ev,name){
   ev.target.classList.add('active');
   document.getElementById('sub-'+name).classList.add('active');
   if(name==='su-planificacion'&&allData&&!allData.planificacion){loadPlanificacion();}
+  if(name==='fp-altabaja'&&!_abMovilesCargados){fpCargarMovilesActivos();}
 }
 function switchOpDay(ev,day){
   const prev=fechaGlobal;

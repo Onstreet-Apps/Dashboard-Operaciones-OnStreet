@@ -289,6 +289,9 @@ function doGet(e) {
         });
       }
 
+    } else if (source === 'moviles_activos') {
+      result = listarMovilesActivos({ token: params.token || null });
+
     } else if (source === 'reporte_perdida_ruta') {
       const cliente     = String(e.parameter.cliente     || '');
       const fechaInicio = String(e.parameter.fechaInicio || '');
@@ -3558,6 +3561,25 @@ function supabaseRpc_(fnName, args) {
   return data;
 }
 
+// Lee de una tabla vía REST (GET /rest/v1/<tabla>?<query>). Misma service key.
+function supabaseSelect_(table, query) {
+  const cfg = supabaseConfig_();
+  const resp = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?' + query, {
+    method: 'get',
+    headers: { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key },
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  const body = resp.getContentText();
+  let data = null;
+  try { data = body ? JSON.parse(body) : null; } catch (e) { /* respuesta no-JSON */ }
+  if (code >= 400) {
+    const msg = (data && data.message) || body || ('HTTP ' + code);
+    throw new Error('Supabase select (' + table + '): ' + msg);
+  }
+  return data || [];
+}
+
 // Callable desde google.script.run y desde doGet source=alta_movil
 function altaMovil(params) {
   if (!params) throw new Error('Faltan datos');
@@ -3593,6 +3615,16 @@ function bajaMovil(params) {
   });
 
   return { ok: true, movil: movilActualizado };
+}
+
+// Callable desde google.script.run y desde doGet source=moviles_activos
+// Lista los móviles activos en Supabase, para poblar el selector de "Dar de baja".
+function listarMovilesActivos(params) {
+  const usuario = verificarToken_((params && params.token) || null);
+  if (!usuario) return { error: 'token_invalido' };
+  const moviles = supabaseSelect_('moviles',
+    'select=id,cliente,movil,sucursal,kam,conductor_actual&estado=eq.activo&order=cliente.asc');
+  return { moviles: moviles };
 }
 
 // Corre esto UNA VEZ desde el editor de Apps Script (Ejecutar) para probar
