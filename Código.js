@@ -773,7 +773,7 @@ var MONDAY_BOARD_RAPIDA_      = '5678712035';
 var MONDAY_BOARD_INTEGRAL_    = '5623247223';
 var MONDAY_BOARD_CONSOLIDADO_ = '5859805996';      // tablero consolidado Supervisiones
 var MONDAY_CONSOL_CACHE_KEY_  = 'monday_consol_v3';
-var MONDAY_CONSOL_CACHE_SEC_  = 600;
+var MONDAY_CONSOL_CACHE_SEC_  = 1800; // alineado con los otros 3 caches de Monday (ver refrescarCacheMonday)
 var MONDAY_BOARD_PLANES_      = '8505742190';
 var MONDAY_PLANES_CACHE_KEY_  = 'monday_planes_v5';
 var MONDAY_PLANES_CACHE_SEC_  = 1800;
@@ -1676,6 +1676,41 @@ function readMondayParallelBundle_() {
     mondaySupervisiones: consolidadoByMovil,
     mondayPlanes: { planes: todosLosPlanes, colEstadoId: checklists.colEstadoId }
   };
+}
+
+// ── Trigger: mantener la caché de Monday siempre tibia ──────────────────────
+// Diagnóstico real (diagnosticoCargaCompleta): las 4 consultas a Monday.com
+// tardan ~24 segundos cuando la caché está fría — eso solo, sin nada más,
+// explica casi toda la carga de la página cuando le tocaba a un usuario
+// justo cuando la caché había vencido. Paralelizarlas con fetchAll() no
+// ayuda: el cuello de botella es lo que tarda Monday en responder consultas
+// de hasta 500 ítems con todas sus columnas, no el orden en que se piden.
+//
+// La solución es la misma que ya se usa para Bitácora: un trigger de tiempo
+// corre en segundo plano, refresca la caché ANTES de que venza, y así
+// ninguna carga de usuario dispara jamás la consulta en vivo. refrescarCacheMonday()
+// borra los 4 caches y los vuelve a llenar; al correr cada 15 min — menos que
+// el TTL de 1800s (30 min) de los 4 — la caché nunca llega a estar vacía
+// cuando alguien abre el dashboard.
+//
+// SETUP (una sola vez): correr "setupMondayCacheTrigger" desde el editor.
+function refrescarCacheMonday() {
+  var cache = CacheService.getScriptCache();
+  cache.remove(MONDAY_CONSOL_CACHE_KEY_);
+  cache.remove(MONDAY_PLANES_CACHE_KEY_);
+  cache.remove(MONDAY_RAPIDA_CACHE_KEY_);
+  cache.remove(MONDAY_INTEGRAL_CACHE_KEY_);
+  var t0 = new Date().getTime();
+  readMondayParallelBundle_();
+  Logger.log('refrescarCacheMonday: ' + (new Date().getTime() - t0) + ' ms');
+}
+
+function setupMondayCacheTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'refrescarCacheMonday') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('refrescarCacheMonday').timeBased().everyMinutes(15).create();
+  Logger.log('Trigger instalado: refrescarCacheMonday cada 15 min');
 }
 
 // ============================================================================
