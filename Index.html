@@ -2108,7 +2108,8 @@ function fpAltaMovil(){
     okEl.textContent='Móvil dado de alta: '+cliente+' '+movil+'.';
     okEl.style.display='block';
     ['abAltaCliente','abAltaMovil','abAltaSucursal','abAltaKam','abAltaConductor','abAltaFecha'].forEach(function(id){ document.getElementById(id).value=''; });
-    _abMovilesCargados=false; // recién dado de alta: refrescar el selector de Baja la próxima vez que se abra
+    _abMovilesCargados=false;
+    fpCargarMovilesActivos(); // refrescar el selector de Baja ya mismo, sin esperar a reabrir la subtab
   });
 }
 
