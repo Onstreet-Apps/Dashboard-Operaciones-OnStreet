@@ -2646,116 +2646,31 @@ function fingerprintGPS_(s) {
     .join('|');
 }
 
-function readGPS(flotaInfo) {
-  flotaInfo = flotaInfo || readFlota();
+// Lee de Supabase (tabla gps_estado_actual) en vez de las Sheets — todo el
+// agrupado por Agrupación, el matching por fingerprint contra Flota y la
+// fusión con las alertas de "Calendario diario" ya lo hace
+// sincronizarGpsASupabase() (cada 5 min, ver esa función junto al resto de
+// sincronizaciones), así que acá no queda casi lógica.
+function readGPS() {
+  const todayStr = formatDateISO(new Date());
+  const rows = supabaseSelect_('gps_estado_actual', 'select=*&fecha=eq.' + todayStr);
 
-  // Doble índice de Flota:
-  //   flotaByFP      → fingerprint(cliente + movil) → entrada de flota
-  //   flotaByMovilFP → fingerprint(movil)            → entrada de flota (fallback)
-  const flotaByFP = {}, flotaByMovilFP = {};
-  (flotaInfo.flota || []).forEach(function(f) {
-    const fp  = fingerprintGPS_(f.cliente + ' ' + f.movil);
-    const fpM = fingerprintGPS_(f.movil);
-    if (!flotaByFP[fp])      flotaByFP[fp]      = f;
-    if (!flotaByMovilFP[fpM]) flotaByMovilFP[fpM] = f;
+  const rutas = rows.map(function(r) {
+    return {
+      nombre: r.nombre, cliente: r.cliente || '', movil: r.movil || '',
+      jefeOperaciones: r.kam || '',
+      posicionReal: (r.posicion_lat != null && r.posicion_lng != null) ? [r.posicion_lat, r.posicion_lng] : null,
+      puntoPlanificado: (r.punto_lat != null && r.punto_lng != null) ? [r.punto_lat, r.punto_lng] : null,
+      tipoAlerta: r.tipo_alerta || 'Sin datos',
+      sinMovimiento: !!r.sin_movimiento,
+      alejandose: !!r.alejandose,
+      distanciaMetros: r.distancia_metros,
+      atrasoMinutos: r.atraso_minutos,
+      horaUltimo: r.hora_ultimo || '',
+      posicionDescripcion: r.posicion_descripcion || '',
+      tieneRutaCalendario: !!r.tiene_ruta_calendario
+    };
   });
-
-  const ss = SpreadsheetApp.openById(SHEETS.informesGPS);
-  const sheet = ss.getSheetByName('Base');
-  if (!sheet) return { rutas: [], fecha: formatDateISO(new Date()), stats: { total: 0, conAtraso: 0, enHorario: 0, sinMovimiento: 0, alejandose: 0 } };
-
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return { rutas: [], fecha: formatDateISO(new Date()), stats: { total: 0, conAtraso: 0, enHorario: 0, sinMovimiento: 0, alejandose: 0 } };
-
-  const values = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
-  const headers = values[0].map(function(h) { return String(h || '').trim(); });
-
-  const idx = {
-    agrupacion: headers.indexOf('Agrupación'),
-    comienzo:   headers.indexOf('Comienzo'),
-    fin:        headers.indexOf('Fin'),
-    posFinal:   headers.indexOf('Posición final'),
-    coordInic:  headers.indexOf('Coordenadas iniciales'),
-    coordFin:   headers.indexOf('Coordenadas finales')
-  };
-  if (idx.agrupacion === -1) throw new Error('Falta columna "Agrupación" en hoja Base de Informes GPS');
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayStr = formatDateISO(today);
-
-  // Recolectar TODOS los viajes de hoy por Agrupación (de abajo a arriba = más reciente primero)
-  const todasPorAgr = {}; // agr → [row más reciente, row anterior, ...]
-  for (var i = lastRow - 1; i >= 1; i--) {
-    const row = values[i];
-    const agr = String(row[idx.agrupacion] || '').trim();
-    if (!agr) continue;
-    // Usar Comienzo o Fin para verificar la fecha
-    const fechaRef = row[idx.comienzo] || row[idx.fin];
-    if (!fechaRef) continue;
-    const fecha = parseFlexibleDate(fechaRef);
-    if (!fecha || formatDateISO(fecha) !== todayStr) continue;
-    if (!todasPorAgr[agr]) todasPorAgr[agr] = [];
-    todasPorAgr[agr].push(row);
-  }
-
-  const rutas = [];
-  for (var agr in todasPorAgr) {
-    const entries = todasPorAgr[agr]; // índice 0 = más reciente
-    const row = entries[0]; // usar el viaje más reciente para posición/hora
-
-    // dobleInicioSinTermino se determina desde readUnificador (hojas "Inicio de Ruta" / "Termino de Ruta")
-    // No se infiere desde la hoja Base del GPS.
-
-    // Limpiar Agrupación: quitar patente final (" - AB-1234" o " - AB1234")
-    // y reemplazar guiones internos por espacios para el fingerprint
-    const agrSinPatente = agr.replace(/\s*-\s*[A-Z]{2,4}[-]?\d{2,4}\s*$/, '');
-    const fp = fingerprintGPS_(agrSinPatente);
-
-    // Buscar en Flota: primero por (cliente+movil), luego solo por movil
-    const flotaEntry = flotaByFP[fp] || flotaByMovilFP[fp];
-
-    const cliente = flotaEntry ? flotaEntry.cliente : '';
-    const movil   = flotaEntry ? flotaEntry.movil   : agrSinPatente.replace(/-/g, ' ').trim();
-    const nombre  = (cliente + ' ' + movil).trim() || agr;
-    const kam     = flotaEntry ? (flotaEntry.kam || '') : '';
-
-    const coordFin  = idx.coordFin  >= 0 ? parseLatLng(row[idx.coordFin])  : null;
-    const coordInic = idx.coordInic >= 0 ? parseLatLng(row[idx.coordInic]) : null;
-    const posicion  = coordFin || coordInic;
-    const horaFin   = idx.fin >= 0 ? formatTime(row[idx.fin]) : '';
-    const posDesc   = idx.posFinal >= 0 ? String(row[idx.posFinal] || '').trim() : '';
-
-    rutas.push({
-      nombre: nombre, cliente: cliente, movil: movil,
-      jefeOperaciones: kam,
-      posicionReal: posicion,
-      puntoPlanificado: null,
-      tipoAlerta: posicion ? 'Con GPS' : 'Sin datos',
-      sinMovimiento: false, alejandose: false,
-      distanciaMetros: null, atrasoMinutos: null,
-      horaUltimo: horaFin,
-      posicionDescripcion: posDesc
-    });
-  }
-
-  // Fusionar alertas del spreadsheet Tiempo Real
-  try {
-    const alertMap = readGPSAlertas_();
-    rutas.forEach(function(r) {
-      const fp = fingerprintGPS_(r.nombre);
-      const a = alertMap[fp];
-      if (a) {
-        r.tipoAlerta          = a.tipoAlerta;
-        r.sinMovimiento       = a.sinMovimiento;
-        r.alejandose          = a.alejandose;
-        r.distanciaMetros     = a.distanciaMetros;
-        r.puntoPlanificado    = a.puntoPlanificado;
-        r.atrasoMinutos       = a.atrasoMinutos;
-        r.tieneRutaCalendario = true;
-      }
-    });
-  } catch (e) { /* alertas opcionales, no bloquear */ }
 
   return {
     rutas: rutas, fecha: todayStr,
@@ -3838,6 +3753,157 @@ function setupSincronizarSupervisionesTrigger() {
   });
   ScriptApp.newTrigger('sincronizarSupervisionesASupabase').timeBased().everyMinutes(15).create();
   Logger.log('Trigger instalado: sincronizarSupervisionesASupabase cada 15 min');
+}
+
+// ============================================================================
+// SINCRONIZACIÓN: GPS (Sheets) → Supabase (gps_estado_actual)
+// ============================================================================
+// Hace acá, cada 5 min, todo lo que antes hacía readGPS() en CADA doGet:
+// agrupar "Base" por Agrupación (quedándose con el viaje más reciente de
+// hoy), matchear contra Flota por fingerprint (fingerprintGPS_), y fusionar
+// las alertas de "Calendario diario" (GPS Tiempo Real) — mismo criterio de
+// siempre. readGPS() queda como una simple lectura de esta tabla.
+//
+// Es estado de HOY, no histórico: se borra y reinserta en cada corrida
+// (como calendario_planificado), así nunca queda una posición vieja
+// mezclada con las nuevas.
+//
+// Arranca en 5 min (el mínimo intervalo de Apps Script después de 1 min) —
+// si hace falta más frescura para las posiciones GPS, bajar a everyMinutes(1)
+// en setupSincronizarGpsTrigger, sabiendo que un trigger cada 1 min compite
+// más seguido por el mismo cupo de ejecución del proyecto.
+//
+// SETUP (una sola vez): correr "setupSincronizarGpsTrigger" desde el editor.
+function sincronizarGpsASupabase() {
+  const flotaInfo = readFlota();
+
+  // Doble índice de Flota (idéntico al que usaba readGPS)
+  const flotaByFP = {}, flotaByMovilFP = {};
+  (flotaInfo.flota || []).forEach(function(f) {
+    const fp  = fingerprintGPS_(f.cliente + ' ' + f.movil);
+    const fpM = fingerprintGPS_(f.movil);
+    if (!flotaByFP[fp])      flotaByFP[fp]      = f;
+    if (!flotaByMovilFP[fpM]) flotaByMovilFP[fpM] = f;
+  });
+
+  const ss = SpreadsheetApp.openById(SHEETS.informesGPS);
+  const sheet = ss.getSheetByName('Base');
+  if (!sheet) { Logger.log('sincronizarGpsASupabase: hoja Base no encontrada'); return; }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { Logger.log('sincronizarGpsASupabase: hoja Base vacía'); return; }
+
+  const values = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+  const headers = values[0].map(function(h) { return String(h || '').trim(); });
+
+  const idx = {
+    agrupacion: headers.indexOf('Agrupación'),
+    comienzo:   headers.indexOf('Comienzo'),
+    fin:        headers.indexOf('Fin'),
+    posFinal:   headers.indexOf('Posición final'),
+    coordInic:  headers.indexOf('Coordenadas iniciales'),
+    coordFin:   headers.indexOf('Coordenadas finales')
+  };
+  if (idx.agrupacion === -1) throw new Error('Falta columna "Agrupación" en hoja Base de Informes GPS');
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayStr = formatDateISO(today);
+
+  const todasPorAgr = {};
+  for (var i = lastRow - 1; i >= 1; i--) {
+    const row = values[i];
+    const agr = String(row[idx.agrupacion] || '').trim();
+    if (!agr) continue;
+    const fechaRef = row[idx.comienzo] || row[idx.fin];
+    if (!fechaRef) continue;
+    const fecha = parseFlexibleDate(fechaRef);
+    if (!fecha || formatDateISO(fecha) !== todayStr) continue;
+    if (!todasPorAgr[agr]) todasPorAgr[agr] = [];
+    todasPorAgr[agr].push(row);
+  }
+
+  const rutas = [];
+  for (var agr in todasPorAgr) {
+    const entries = todasPorAgr[agr];
+    const row = entries[0];
+
+    const agrSinPatente = agr.replace(/\s*-\s*[A-Z]{2,4}[-]?\d{2,4}\s*$/, '');
+    const fp = fingerprintGPS_(agrSinPatente);
+    const flotaEntry = flotaByFP[fp] || flotaByMovilFP[fp];
+
+    const cliente = flotaEntry ? flotaEntry.cliente : '';
+    const movil   = flotaEntry ? flotaEntry.movil   : agrSinPatente.replace(/-/g, ' ').trim();
+    const nombre  = (cliente + ' ' + movil).trim() || agr;
+    const kam     = flotaEntry ? (flotaEntry.kam || '') : '';
+
+    const coordFin  = idx.coordFin  >= 0 ? parseLatLng(row[idx.coordFin])  : null;
+    const coordInic = idx.coordInic >= 0 ? parseLatLng(row[idx.coordInic]) : null;
+    const posicion  = coordFin || coordInic;
+    const horaFin   = idx.fin >= 0 ? formatTime(row[idx.fin]) : '';
+    const posDesc   = idx.posFinal >= 0 ? String(row[idx.posFinal] || '').trim() : '';
+
+    rutas.push({
+      nombre: nombre, cliente: cliente, movil: movil, kam: kam,
+      posicion: posicion, puntoPlanificado: null,
+      tipoAlerta: posicion ? 'Con GPS' : 'Sin datos',
+      sinMovimiento: false, alejandose: false,
+      distanciaMetros: null, atrasoMinutos: null,
+      horaUltimo: horaFin, posicionDescripcion: posDesc,
+      tieneRutaCalendario: false
+    });
+  }
+
+  try {
+    const alertMap = readGPSAlertas_();
+    rutas.forEach(function(r) {
+      const fp = fingerprintGPS_(r.nombre);
+      const a = alertMap[fp];
+      if (a) {
+        r.tipoAlerta          = a.tipoAlerta;
+        r.sinMovimiento       = a.sinMovimiento;
+        r.alejandose          = a.alejandose;
+        r.distanciaMetros     = a.distanciaMetros;
+        r.puntoPlanificado    = a.puntoPlanificado;
+        r.atrasoMinutos       = a.atrasoMinutos;
+        r.tieneRutaCalendario = true;
+      }
+    });
+  } catch (e) { Logger.log('sincronizarGpsASupabase: alertas: ' + e); }
+
+  const filas = rutas.map(function(r) {
+    return {
+      fecha: todayStr,
+      nombre: r.nombre, cliente: r.cliente, movil: r.movil, kam: r.kam,
+      posicion_lat: r.posicion ? r.posicion[0] : null,
+      posicion_lng: r.posicion ? r.posicion[1] : null,
+      tipo_alerta: r.tipoAlerta,
+      sin_movimiento: r.sinMovimiento,
+      alejandose: r.alejandose,
+      distancia_metros: r.distanciaMetros,
+      punto_lat: r.puntoPlanificado ? r.puntoPlanificado[0] : null,
+      punto_lng: r.puntoPlanificado ? r.puntoPlanificado[1] : null,
+      atraso_minutos: r.atrasoMinutos,
+      hora_ultimo: r.horaUltimo,
+      posicion_descripcion: r.posicionDescripcion,
+      tiene_ruta_calendario: r.tieneRutaCalendario
+    };
+  });
+
+  supabaseDeleteAll_('gps_estado_actual');
+  var BATCH = 500;
+  for (var b = 0; b < filas.length; b += BATCH) {
+    supabaseInsert_('gps_estado_actual', filas.slice(b, b + BATCH));
+  }
+  Logger.log('sincronizarGpsASupabase: ' + filas.length + ' móviles sincronizados');
+}
+
+function setupSincronizarGpsTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'sincronizarGpsASupabase') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('sincronizarGpsASupabase').timeBased().everyMinutes(5).create();
+  Logger.log('Trigger instalado: sincronizarGpsASupabase cada 5 min');
 }
 
 // Callable desde google.script.run y desde doGet source=alta_movil
