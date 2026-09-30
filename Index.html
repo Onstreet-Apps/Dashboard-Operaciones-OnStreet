@@ -1654,7 +1654,7 @@ function applyKamFilter(arr){
 
 function loadData(){
   allData={};
-  setStatus('loading','Cargando Operación...');
+  setStatus('loading','Cargando datos...');
   var p={token:sessionToken||null};
   if(fechaGlobal) p.fecha=fechaGlobal;
 
@@ -1669,81 +1669,70 @@ function loadData(){
     return true;
   }
 
-  function step1(){
-    var onOk=function(d){
-      if(!d){setStatus('error','Sin datos recibidos');return;}
-      if(!merge(d)){setStatus('error','Error de autenticación');return;}
-      populateKamSelector();
-      if(allData.unificador) renderOperacion();
-      if(allData.historico) renderHistorico();
-      if(allData.unificador||allData.historico) renderTendencias();
-      if(allData.unificador) renderDetalleOperacion();
-      renderBannerDormidos();
-      setStatus('loading','Cargando GPS/Alertas...');
-      step2();
-    };
-    var onErr=function(err){setStatus('error','Error al cargar: '+(err&&err.message?err.message:String(err)));};
-    if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).getTabOperacion(p);
-    } else {
-      authFetch('tab_operacion',p).then(onOk).catch(onErr);
-    }
+  // Las 4 secciones se piden en paralelo (antes iban encadenadas una tras otra,
+  // así que el tiempo total era la SUMA de las cuatro en vez del máximo).
+  var pasosRestantes=4;
+  function pasoTerminado(){
+    pasosRestantes--;
+    if(pasosRestantes>0){ setStatus('loading','Cargando datos... ('+(4-pasosRestantes)+'/4)'); return; }
+    var ts=new Date(allData.lastUpdated||Date.now());
+    var msg='Actualizado a las '+ts.toLocaleTimeString('es-CL',{hour:'2-digit',minute:'2-digit'});
+    if(fechaGlobal) msg+=' · viendo '+formatDate(fechaGlobal);
+    setStatus('ok',msg);
   }
 
-  function step2(){
+  (function cargarOperacion(){
     var onOk=function(d){
-      merge(d);
-      if(allData.gps) renderGPS();
-      setStatus('loading','Cargando Bitácora...');
-      step3();
+      if(merge(d)){
+        populateKamSelector();
+        if(allData.unificador) renderOperacion();
+        if(allData.historico) renderHistorico();
+        if(allData.unificador||allData.historico) renderTendencias();
+        if(allData.unificador) renderDetalleOperacion();
+        renderBannerDormidos();
+      }
+      pasoTerminado();
     };
-    var onErr=function(){step3();};
     if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).getTabGps(p);
+      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabOperacion(p);
     } else {
-      authFetch('tab_gps',p).then(onOk).catch(function(){step3();});
+      authFetch('tab_operacion',p).then(onOk).catch(pasoTerminado);
     }
-  }
+  })();
 
-  function step3(){
-    var onOk=function(d){
-      merge(d);
-      if(allData.bitacora) renderBitacora();
-      setStatus('loading','Cargando Supervisiones...');
-      step4();
-    };
-    var onErr=function(){step4();};
+  (function cargarGps(){
+    var onOk=function(d){ merge(d); if(allData.gps) renderGPS(); pasoTerminado(); };
     if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).getTabBitacora(p);
+      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabGps(p);
     } else {
-      authFetch('tab_bitacora',p).then(onOk).catch(function(){step4();});
+      authFetch('tab_gps',p).then(onOk).catch(pasoTerminado);
     }
-  }
+  })();
 
-  function step4(){
+  (function cargarBitacora(){
+    var onOk=function(d){ merge(d); if(allData.bitacora) renderBitacora(); pasoTerminado(); };
+    if(IS_GAS){
+      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabBitacora(p);
+    } else {
+      authFetch('tab_bitacora',p).then(onOk).catch(pasoTerminado);
+    }
+  })();
+
+  (function cargarSupervisiones(){
     var onOk=function(d){
       merge(d);
       if(allData.supervisiones) renderSupervisiones();
       renderMondaySupervisiones();
       renderMondayPlanes();
       initNotifications();
-      var ts=new Date(allData.lastUpdated||Date.now());
-      var msg='Actualizado a las '+ts.toLocaleTimeString('es-CL',{hour:'2-digit',minute:'2-digit'});
-      if(fechaGlobal) msg+=' · viendo '+formatDate(fechaGlobal);
-      setStatus('ok',msg);
-    };
-    var onErr=function(){
-      var ts=new Date(allData.lastUpdated||Date.now());
-      setStatus('ok','Actualizado a las '+ts.toLocaleTimeString('es-CL',{hour:'2-digit',minute:'2-digit'}));
+      pasoTerminado();
     };
     if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).getTabSupervisiones(p);
+      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabSupervisiones(p);
     } else {
-      authFetch('tab_supervisiones',p).then(onOk).catch(onErr);
+      authFetch('tab_supervisiones',p).then(onOk).catch(pasoTerminado);
     }
-  }
-
-  step1();
+  })();
 }
 
 function setStatus(state,msg){
