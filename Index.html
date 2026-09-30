@@ -1584,6 +1584,7 @@ const ciudadesCoords = {
 
 let allData = null;
 let refreshTimer = null;
+let isLoadingData = false;
 let fechaGlobal = null;
 let kamGlobal = '';
 let suKpiMesSeleccionado = null;
@@ -1653,6 +1654,12 @@ function applyKamFilter(arr){
 }
 
 function loadData(){
+  // Traba contra clics repetidos en "Actualizar ahora" mientras ya hay una
+  // carga en curso: cada doGet tarda 15-25s solo, y Apps Script encola las
+  // ejecuciones concurrentes del mismo proyecto — un segundo clic no la
+  // acelera, la pone en fila detrás de la primera y duplica la espera.
+  if(isLoadingData) return;
+  isLoadingData=true;
   allData={};
   setStatus('loading','Cargando datos...');
   var p={token:sessionToken||null};
@@ -1675,6 +1682,7 @@ function loadData(){
   // el mismo proyecto, así que 4 llamadas (aunque se disparen juntas) igual
   // terminan sumando sus tiempos. Una sola ejecución evita esa cola.
   var onOk=function(d){
+    isLoadingData=false;
     if(!d){setStatus('error','Sin datos recibidos');return;}
     if(!merge(d)){setStatus('error','Error de autenticación');return;}
     populateKamSelector();
@@ -1694,7 +1702,7 @@ function loadData(){
     if(fechaGlobal) msg+=' · viendo '+formatDate(fechaGlobal);
     setStatus('ok',msg);
   };
-  var onErr=function(err){setStatus('error','Error al cargar: '+(err&&err.message?err.message:String(err)));};
+  var onErr=function(err){isLoadingData=false;setStatus('error','Error al cargar: '+(err&&err.message?err.message:String(err)));};
 
   if(IS_GAS){
     google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).getDashboardData(p);
