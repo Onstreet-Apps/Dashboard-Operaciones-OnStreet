@@ -773,13 +773,17 @@ var MONDAY_BOARD_RAPIDA_      = '5678712035';
 var MONDAY_BOARD_INTEGRAL_    = '5623247223';
 var MONDAY_BOARD_CONSOLIDADO_ = '5859805996';      // tablero consolidado Supervisiones
 var MONDAY_CONSOL_CACHE_KEY_  = 'monday_consol_v3';
-var MONDAY_CONSOL_CACHE_SEC_  = 1800; // alineado con los otros 3 caches de Monday (ver refrescarCacheMonday)
+// 2400s (40 min), no 1800 — el trigger refrescarCacheMonday pasó de cada 15 a
+// cada 30 min (ver más abajo) para chocar menos con los doGet de usuarios;
+// el TTL necesita quedar por encima de ese intervalo o la caché podría
+// vencer justo antes de que el trigger la renueve.
+var MONDAY_CONSOL_CACHE_SEC_  = 2400;
 var MONDAY_BOARD_PLANES_      = '8505742190';
 var MONDAY_PLANES_CACHE_KEY_  = 'monday_planes_v5';
-var MONDAY_PLANES_CACHE_SEC_  = 1800;
+var MONDAY_PLANES_CACHE_SEC_  = 2400;
 var MONDAY_RAPIDA_CACHE_KEY_  = 'monday_rapida_v2';
 var MONDAY_INTEGRAL_CACHE_KEY_= 'monday_integral_v2';
-var MONDAY_SUP_CACHE_SEC_     = 1800;
+var MONDAY_SUP_CACHE_SEC_     = 2400;
 var MONDAY_PLAN_ESTADO_PFX_   = 'pe_';        // PropertiesService key prefix para estados locales
 
 function setupMondayToken() {
@@ -1689,9 +1693,17 @@ function readMondayParallelBundle_() {
 // La solución es la misma que ya se usa para Bitácora: un trigger de tiempo
 // corre en segundo plano, refresca la caché ANTES de que venza, y así
 // ninguna carga de usuario dispara jamás la consulta en vivo. refrescarCacheMonday()
-// borra los 4 caches y los vuelve a llenar; al correr cada 15 min — menos que
-// el TTL de 1800s (30 min) de los 4 — la caché nunca llega a estar vacía
+// borra los 4 caches y los vuelve a llenar; al correr cada 30 min — menos que
+// el TTL de 2400s (40 min) de los 4 — la caché nunca llega a estar vacía
 // cuando alguien abre el dashboard.
+//
+// Panel de Ejecuciones real: con este trigger (y revisarYNotificarPlanesNuevos)
+// cada 15 min, un doGet de usuario que coincidía con cualquiera de los dos
+// quedaba en cola detrás y tardaba 20-35s en vez de 3-6s. Bajarlos a cada 30
+// min reduce a la mitad cuánto tiempo por hora el proyecto está "ocupado" por
+// un trigger cuando entra un usuario — no elimina el choque (Apps Script sigue
+// sin ejecutar dos cosas del mismo proyecto en paralelo), pero lo hace bastante
+// menos frecuente.
 //
 // SETUP (una sola vez): correr "setupMondayCacheTrigger" desde el editor.
 function refrescarCacheMonday() {
@@ -1709,8 +1721,8 @@ function setupMondayCacheTrigger() {
   ScriptApp.getProjectTriggers().forEach(function(t) {
     if (t.getHandlerFunction() === 'refrescarCacheMonday') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('refrescarCacheMonday').timeBased().everyMinutes(15).create();
-  Logger.log('Trigger instalado: refrescarCacheMonday cada 15 min');
+  ScriptApp.newTrigger('refrescarCacheMonday').timeBased().everyMinutes(30).create();
+  Logger.log('Trigger instalado: refrescarCacheMonday cada 30 min');
 }
 
 // ============================================================================
@@ -1895,12 +1907,15 @@ function inicializarPlanesNotificados() {
 }
 
 // Ejecutar UNA VEZ desde el editor de Apps Script para instalar el trigger periódico.
+// 30 min y no 15: en el panel de Ejecuciones esta función tardó hasta 35.5s, y
+// cada vez que coincidía con un doGet de usuario lo dejaba en cola. Que un plan
+// nuevo se avise 15 minutos más tarde no se nota; que la página tarde 30s sí.
 function setupNotificacionesPlanesTrigger() {
   ScriptApp.getProjectTriggers().forEach(function(t) {
     if (t.getHandlerFunction() === 'revisarYNotificarPlanesNuevos') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('revisarYNotificarPlanesNuevos').timeBased().everyMinutes(15).create();
-  Logger.log('Trigger instalado: revisarYNotificarPlanesNuevos cada 15 min');
+  ScriptApp.newTrigger('revisarYNotificarPlanesNuevos').timeBased().everyMinutes(30).create();
+  Logger.log('Trigger instalado: revisarYNotificarPlanesNuevos cada 30 min');
 }
 
 function getTabSupervisiones(params) {
