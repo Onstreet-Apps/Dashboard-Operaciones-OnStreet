@@ -3062,296 +3062,36 @@ function readSegundaRuta(fechaParam) {
 //   Match por columnas "Concat" y "Cliente" del Sheet (verdad explícita).
 //   Fallback: estrategias antiguas (propagación de logos + normalización).
 // ============================================================================
+// Lee de Supabase (tabla supervisiones_resumen) en vez de la Sheet — todo el
+// matching difuso contra Flota y el recálculo de meses desde "BBDD
+// Supervisiones" ya lo hace sincronizarSupervisionesASupabase() (cada 15 min,
+// ver esa función junto al resto de sincronizaciones), así que acá no queda
+// casi lógica.
 function readSupervisiones(flotaInfo) {
-  const ss = SpreadsheetApp.openById(SHEETS.supervisiones);
-  const sheet = ss.getSheetByName(SUPERVISIONES_TAB);
-  if (!sheet) throw new Error('Pestaña "' + SUPERVISIONES_TAB + '" no encontrada');
-
   flotaInfo = flotaInfo || readFlota();
   const flota = flotaInfo.flota;
 
-  // Índices de Flota para match
-  const flotaPorClienteMovilExacto = {};
-  const flotaPorClienteMovilNorm = {};
-  const flotaPorNombre = {};
-  const flotaPorNombreNorm = {};
-  // Fingerprint de palabras para match parcial (ej. "Minera Los Pelambres" ↔ "Los Pelambres")
-  const flotaFPWords = []; // [{words: Set, f}]
-  function fpWords_(s) {
-    return new Set(normalize_(s).replace(/\bmovil\b/g,'').replace(/[\/\-]/g,' ')
-      .split(' ').filter(function(w){return w.length>1;}));
-  }
-  flota.forEach(f => {
-    flotaPorClienteMovilExacto[(f.cliente + '|' + f.movil).toLowerCase()] = f;
-    flotaPorClienteMovilNorm[normalize_(f.cliente + ' ' + f.movil)] = f;
-    // Siempre indexar por cliente+movil para subset matching
-    flotaFPWords.push({ words: fpWords_(f.cliente + ' ' + f.movil), f: f });
-    if (f.nombre && normalize_(f.nombre) !== normalize_(f.cliente + ' ' + f.movil)) {
-      flotaPorNombre[f.nombre.toLowerCase()] = f;
-      flotaPorNombreNorm[normalize_(f.nombre)] = f;
-      flotaFPWords.push({ words: fpWords_(f.nombre), f: f });
-    } else if (f.nombre) {
-      flotaPorNombre[f.nombre.toLowerCase()] = f;
-      flotaPorNombreNorm[normalize_(f.nombre)] = f;
-    }
-  });
-  // Subconjunto: todas las palabras de A están en B (o viceversa)
-  function subsetMatch_(concatStr) {
-    const cw = fpWords_(concatStr);
-    if (cw.size === 0) return null;
-    for (var i = 0; i < flotaFPWords.length; i++) {
-      const fw = flotaFPWords[i].words;
-      if (fw.size === 0) continue;
-      // Verificar si fw ⊆ cw o cw ⊆ fw
-      var fwInCw = true;
-      fw.forEach(function(w){ if (!cw.has(w)) fwInCw = false; });
-      if (fwInCw) return flotaFPWords[i].f;
-      var cwInFw = true;
-      cw.forEach(function(w){ if (!fw.has(w)) cwInFw = false; });
-      if (cwInFw) return flotaFPWords[i].f;
-    }
-    return null;
-  }
+  const rows = supabaseSelect_('supervisiones_resumen',
+    'select=nombre,cliente,movil,meta,meses,total,meses_sup,pct_movil');
 
-  const values = sheet.getDataRange().getValues();
-  if (values.length < 2) {
-    return { moviles: [], anio: '', stats: { flotaActiva: flota.length, cruzados: 0, sinCruce: flota.length } };
-  }
-
-  // ---- Detectar columnas por header ----
-  // Las primeras filas pueden ser de título. Buscamos la fila que tenga
-  // headers reconocibles ("Concat" o "Movil"/"Móvil" + "Cliente" + meses).
-  const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-  const mesesNorm = meses.map(m => normalize_(m));
-
-  let headerRow = -1;
-  let idx = { concat: -1, cliente: -1, movil: -1, total: -1, mesesSup: -1, meta: -1, pctMovil: -1, meses: [] };
-
-  for (let r = 0; r < Math.min(values.length, 10); r++) {
-    const row = values[r].map(c => normalize_(c));
-    const concatI = row.indexOf('concat');
-    const clienteI = row.indexOf('cliente');
-    // contar cuántos meses aparecen en esa fila
-    let mesesFound = 0;
-    mesesNorm.forEach(mn => { if (row.indexOf(mn) >= 0) mesesFound++; });
-    if (concatI >= 0 && clienteI >= 0 && mesesFound >= 6) {
-      headerRow = r;
-      idx.concat = concatI;
-      idx.cliente = clienteI;
-      // Buscar índices de cada mes
-      idx.meses = mesesNorm.map(mn => row.indexOf(mn));
-      // móvil (columna del "código" o "nombre corto", opcional)
-      idx.movil = row.indexOf('movil');
-      if (idx.movil < 0) idx.movil = row.indexOf('móvil'.normalize('NFD').replace(/[\u0300-\u036f]/g,''));
-      // total / meses sup / meta / pct — substring match (headers pueden ser "Total Supervisiones", "Meta Anual", etc.)
-      const findSub_ = function(terms) {
-        for (var t = 0; t < terms.length; t++) {
-          var exact = row.indexOf(terms[t]);
-          if (exact >= 0) return exact;
-        }
-        for (var t = 0; t < terms.length; t++) {
-          for (var k = 0; k < row.length; k++) {
-            if (row[k].indexOf(terms[t]) >= 0) return k;
-          }
-        }
-        return -1;
-      };
-      idx.total    = findSub_(['total supervisiones', 'total']);
-      idx.mesesSup = findSub_(['meses supervisados', 'meses sup']);
-      idx.meta     = findSub_(['meta anual', 'meta']);
-      idx.pctMovil = findSub_(['% cumplimiento visita anual movil', '% movil', 'cumplimiento', 'porcentaje']);
-      break;
-    }
-  }
-
-  // Fallback al esquema "v13" (sin headers) si no encontramos headers
-  const usingHeaders = headerRow >= 0;
-  if (!usingHeaders) {
-    // Esquema legacy: col 0 = nombre completo, col 1 = cliente, col 3 = móvil,
-    // meses col 5..16, total 17, mesesSup 18, meta 19, pctMovil 20.
-    headerRow = 0;
-    idx.concat = 0;
-    idx.cliente = 1;
-    idx.movil = 3;
-    idx.meses = [];
-    for (let j = 0; j < 12; j++) idx.meses.push(5 + j);
-    idx.total = 17;
-    idx.mesesSup = 18;
-    idx.meta = 19;
-    idx.pctMovil = 20;
-  }
-
-  // ---- Leer filas de datos ----
-  const supPorFlotaKey = {};
-  const filasSheet = [];      // 1 entrada por móvil presente en "Resumen Supervisiones" (en orden del sheet)
-  const filasSheetSeen = {};  // dedupe por clave canónica
-  const sinMatch = [];
-  let lastCliente = '';
-
-  // Filas de subtotal / total que a veces cuelgan al final de la hoja
-  function esFilaTotal_(s) {
-    const n = normalize_(s);
-    return n === 'total' || n === 'totales' || n === 'suma' || n === 'suma total' ||
-           n.indexOf('total general') >= 0 || n.indexOf('total flota') >= 0;
-  }
-
-  for (let i = headerRow + 1; i < values.length; i++) {
-    const row = values[i];
-    const concat = idx.concat >= 0 ? String(row[idx.concat] || '').trim() : '';
-    let cliente = idx.cliente >= 0 ? String(row[idx.cliente] || '').trim() : '';
-    const movil = idx.movil >= 0 ? String(row[idx.movil] || '').trim() : '';
-
-    // Propagar cliente cuando viene vacío (caso logo)
-    if (!cliente && (concat || movil) && lastCliente) cliente = lastCliente;
-    else if (cliente) lastCliente = cliente;
-
-    // Necesitamos al menos un identificador
-    if (!concat && !movil) continue;
-    if (!cliente && !concat) continue;
-    // Saltar filas de subtotal/total
-    if (esFilaTotal_(concat) || esFilaTotal_(cliente) || esFilaTotal_(movil)) continue;
-
-    // Construir el objeto de datos (meses + agregados)
-    const supMeses = {};
-    for (let j = 0; j < 12; j++) {
-      const col = idx.meses[j];
-      const v = (col >= 0 && col < row.length) ? row[col] : '';
-      supMeses[meses[j]] = (v === '' || v === null) ? 0 : (parseInt(v, 10) || 0);
-    }
-
-    const data = {
-      meses: supMeses,
-      total: idx.total >= 0 ? (parseInt(row[idx.total], 10) || 0) : 0,
-      mesesSup: idx.mesesSup >= 0 ? (parseInt(row[idx.mesesSup], 10) || 0) : 0,
-      meta: idx.meta >= 0 ? (parseFloat(row[idx.meta]) || 0) : 0,
-      pctMovil: idx.pctMovil >= 0 ? (parseFloat(row[idx.pctMovil]) || 0) : 0
+  const moviles = rows.map(function(r) {
+    return {
+      nombre: r.nombre, cliente: r.cliente, movil: r.movil,
+      meses: r.meses || {}, total: r.total || 0, mesesSup: r.meses_sup || 0,
+      meta: r.meta || 0, pctMovil: r.pct_movil || 0
     };
+  });
 
-    // ---- MATCH ----
-    // Estrategia 1: por Concat → Flota.Movil (nombre completo)  ← match nuevo
-    // Estrategia 2: por Cliente + Movil (exacto)
-    // Estrategia 3: por Cliente + Movil (normalizado)
-    // Estrategia 4: por nombre normalizado (Concat normalizado vs Flota.Movil normalizado)
-    let f = null;
-
-    if (concat) {
-      f = flotaPorNombre[concat.toLowerCase()] || flotaPorNombreNorm[normalize_(concat)];
-    }
-    if (!f && cliente && movil) {
-      const k1 = (cliente + '|' + movil).toLowerCase();
-      f = flotaPorClienteMovilExacto[k1] || flotaPorClienteMovilNorm[normalize_(cliente + ' ' + movil)];
-    }
-    // Fallback: coincidencia por subconjunto de palabras (ej "Minera Los Pelambres Móvil" ↔ "Los Pelambres Móvil")
-    if (!f && concat) {
-      f = subsetMatch_(concat);
-    }
-    if (!f && cliente && movil) {
-      f = subsetMatch_(cliente + ' ' + movil);
-    }
-
-    // Sólo se listan los móviles que están en la hoja de Supervisiones Y en la
-    // Flota activa. Con esto quedan fuera:
-    //  - filas que no son móviles (subtotales "Móviles Supervisados",
-    //    "Supervisiones Totales", "Cumplimiento", etc.)
-    //  - móviles marcados "Sin Funcionamiento" / dados de baja, que ya no están
-    //    en la Flota
-    //  - clientes/móviles recién agregados a Flota que todavía no están en la
-    //    hoja de Supervisiones
-    if (!f) {
-      sinMatch.push({ concat: concat, cliente: cliente, movil: movil });
-      continue;
-    }
-    supPorFlotaKey[(f.cliente + '|' + f.movil).toLowerCase()] = data;
-
-    const outKey = (f.cliente + '|' + f.movil).toLowerCase();
-    if (filasSheetSeen[outKey]) continue;   // el mismo móvil no se lista dos veces
-    filasSheetSeen[outKey] = true;
-    filasSheet.push({
-      nombre: f.nombre, cliente: f.cliente, movil: f.movil,
-      meses: data.meses, total: data.total, mesesSup: data.mesesSup,
-      meta: data.meta, pctMovil: data.pctMovil
-    });
-  }
-
-  // ── Recalcular los meses desde "BBDD Supervisiones" ─────────────────────────
-  // Las columnas de meses de "Resumen Supervisiones 2026" son fórmulas
-  // =SUMAPRODUCTO(...'BBDD Supervisiones'...). Google no las recalcula si nadie
-  // tiene el archivo abierto, así que getValues() puede leer valores viejos.
-  // Contamos los eventos crudos nosotros mismos → siempre coincide con la realidad.
-  let bbddDiag = { ok: false };
-  try {
-    const bbdd = ss.getSheetByName('BBDD Supervisiones');
-    if (bbdd) {
-      const bv = bbdd.getDataRange().getValues();
-      // Columnas C = "Concat" (Cliente + Móvil), D = Fecha — igual que las fórmulas
-      // SUMAPRODUCTO de Panel/Resumen. Se detecta por header con fallback a C/D.
-      let bIdxConcat = 2, bIdxFecha = 3, bHeaderRow = 0;
-      for (let r = 0; r < Math.min(bv.length, 8); r++) {
-        const hr = bv[r].map(c => normalize_(c));
-        const ci = hr.indexOf('concat');
-        let fi = hr.indexOf('fecha');
-        if (fi < 0) fi = hr.indexOf('fecha supervision');
-        if (fi < 0) fi = hr.indexOf('fecha de supervision');
-        if (ci >= 0 && fi >= 0) { bHeaderRow = r; bIdxConcat = ci; bIdxFecha = fi; break; }
-      }
-      const anioNum = parseInt((SUPERVISIONES_TAB.match(/\d{4}/) || [])[0] || '0', 10);
-      const countByKeyMonth = {};
-      let contadas = 0;
-      for (let i = bHeaderRow + 1; i < bv.length; i++) {
-        const key = normalize_(bv[i][bIdxConcat]);
-        if (!key) continue;
-        const fecha = parseFlexibleDate(bv[i][bIdxFecha]);
-        if (!fecha || isNaN(fecha.getTime())) continue;
-        if (anioNum && fecha.getFullYear() !== anioNum) continue;
-        if (!countByKeyMonth[key]) countByKeyMonth[key] = [0,0,0,0,0,0,0,0,0,0,0,0];
-        countByKeyMonth[key][fecha.getMonth()]++;
-        contadas++;
-      }
-      let aplicados = 0;
-      if (Object.keys(countByKeyMonth).length > 0) {
-        filasSheet.forEach(function(m) {
-          // Clave = identidad real del móvil (Cliente + Móvil de la Flota), NUNCA
-          // el "Concat" de la hoja resumen (puede venir de un cruce difuso errado).
-          const c = countByKeyMonth[normalize_(m.cliente + ' ' + m.movil)] ||
-                    countByKeyMonth[normalize_(m.nombre)];
-          if (!c) return;   // sin registros en BBDD → se conserva lo de la hoja resumen
-          const mm = {};
-          let tot = 0, nMeses = 0;
-          for (let j = 0; j < 12; j++) {
-            mm[meses[j]] = c[j];
-            tot += c[j];
-            if (c[j] > 0) nMeses++;
-          }
-          m.meses = mm;
-          m.total = tot;
-          m.mesesSup = nMeses;
-          m.pctMovil = m.meta > 0 ? nMeses / m.meta : 0;
-          aplicados++;
-        });
-      }
-      bbddDiag = { ok: true, contadas: contadas, claves: Object.keys(countByKeyMonth).length, aplicados: aplicados };
-    } else {
-      bbddDiag = { ok: false, motivo: 'tab BBDD Supervisiones no encontrada' };
-    }
-  } catch (e) {
-    bbddDiag = { ok: false, error: String(e) };
-    // "BBDD Supervisiones" no disponible → se usan los valores de "Resumen Supervisiones 2026"
-  }
-
-  // ---- Salida: móviles que están en "Resumen Supervisiones" Y en la Flota ----
-  const moviles = filasSheet;
+  const anio = SUPERVISIONES_TAB.match(/\d{4}/) ? SUPERVISIONES_TAB.match(/\d{4}/)[0] : '';
 
   return {
     moviles: moviles,
-    anio: SUPERVISIONES_TAB.match(/\d{4}/) ? SUPERVISIONES_TAB.match(/\d{4}/)[0] : '',
+    anio: anio,
     stats: {
       flotaActiva: flota.length,
       enSupervisiones: moviles.length,
-      cruzados: moviles.filter(m => m.total > 0 || m.meta > 0).length,
-      sinCruce: moviles.filter(m => m.total === 0 && m.meta === 0).length,
-      filasSupervisionesSinMatch: sinMatch.length,
-      modoHeaders: usingHeaders ? 'concat+cliente' : 'legacy-posicional',
-      bbdd: bbddDiag
+      cruzados: moviles.filter(function(m){ return m.total > 0 || m.meta > 0; }).length,
+      sinCruce: moviles.filter(function(m){ return m.total === 0 && m.meta === 0; }).length
     }
   };
 }
@@ -3913,6 +3653,191 @@ function setupSincronizarCalendarioTrigger() {
   });
   ScriptApp.newTrigger('sincronizarCalendarioASupabase').timeBased().everyMinutes(15).create();
   Logger.log('Trigger instalado: sincronizarCalendarioASupabase cada 15 min');
+}
+
+// ============================================================================
+// SINCRONIZACIÓN: Supervisiones (Sheet) → Supabase (supervisiones_resumen)
+// ============================================================================
+// Hace acá, cada 15 min, todo lo que antes hacía readSupervisiones() en CADA
+// doGet: el matching difuso contra Flota (Concat → nombre completo, Cliente+
+// Móvil exacto/normalizado, subconjunto de palabras — mismas 4 estrategias
+// de siempre) y el recálculo de meses desde "BBDD Supervisiones" (sus
+// fórmulas =SUMAPRODUCTO no siempre están al día si nadie tiene el archivo
+// abierto). readSupervisiones() queda como una simple lectura de esta tabla
+// ya resuelta — se borra y reinserta en cada corrida, así que nunca queda a
+// medio actualizar.
+//
+// SETUP (una sola vez): correr "setupSincronizarSupervisionesTrigger" desde el editor.
+function sincronizarSupervisionesASupabase() {
+  const flotaInfo = readFlota();
+  const flota = flotaInfo.flota;
+
+  // ── Índices de match contra Flota (idéntico al que usaba readSupervisiones) ──
+  const flotaPorClienteMovilExacto = {};
+  const flotaPorClienteMovilNorm = {};
+  const flotaPorNombre = {};
+  const flotaPorNombreNorm = {};
+  const flotaFPWords = [];
+  function fpWords_(s) {
+    return new Set(normalize_(s).replace(/\bmovil\b/g,'').replace(/[\/\-]/g,' ')
+      .split(' ').filter(function(w){return w.length>1;}));
+  }
+  flota.forEach(function(f) {
+    flotaPorClienteMovilExacto[(f.cliente + '|' + f.movil).toLowerCase()] = f;
+    flotaPorClienteMovilNorm[normalize_(f.cliente + ' ' + f.movil)] = f;
+    flotaFPWords.push({ words: fpWords_(f.cliente + ' ' + f.movil), f: f });
+    if (f.nombre && normalize_(f.nombre) !== normalize_(f.cliente + ' ' + f.movil)) {
+      flotaPorNombre[f.nombre.toLowerCase()] = f;
+      flotaPorNombreNorm[normalize_(f.nombre)] = f;
+      flotaFPWords.push({ words: fpWords_(f.nombre), f: f });
+    } else if (f.nombre) {
+      flotaPorNombre[f.nombre.toLowerCase()] = f;
+      flotaPorNombreNorm[normalize_(f.nombre)] = f;
+    }
+  });
+  function subsetMatch_(concatStr) {
+    const cw = fpWords_(concatStr);
+    if (cw.size === 0) return null;
+    for (var i = 0; i < flotaFPWords.length; i++) {
+      const fw = flotaFPWords[i].words;
+      if (fw.size === 0) continue;
+      var fwInCw = true;
+      fw.forEach(function(w){ if (!cw.has(w)) fwInCw = false; });
+      if (fwInCw) return flotaFPWords[i].f;
+      var cwInFw = true;
+      cw.forEach(function(w){ if (!fw.has(w)) cwInFw = false; });
+      if (cwInFw) return flotaFPWords[i].f;
+    }
+    return null;
+  }
+  function esFilaTotal_(s) {
+    const n = normalize_(s);
+    return n === 'total' || n === 'totales' || n === 'suma' || n === 'suma total' ||
+           n.indexOf('total general') >= 0 || n.indexOf('total flota') >= 0;
+  }
+
+  const ss = SpreadsheetApp.openById(SHEETS.supervisiones);
+  const sheet = ss.getSheetByName(SUPERVISIONES_TAB);
+  if (!sheet) throw new Error('Pestaña "' + SUPERVISIONES_TAB + '" no encontrada');
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) { Logger.log('sincronizarSupervisionesASupabase: hoja vacía'); return; }
+
+  const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const mesesNorm = meses.map(function(m){ return normalize_(m); });
+
+  let headerRow = -1;
+  let idx = { concat: -1, cliente: -1, movil: -1, meta: -1 };
+  for (let r = 0; r < Math.min(values.length, 10); r++) {
+    const row = values[r].map(function(c){ return normalize_(c); });
+    const concatI = row.indexOf('concat');
+    const clienteI = row.indexOf('cliente');
+    let mesesFound = 0;
+    mesesNorm.forEach(function(mn){ if (row.indexOf(mn) >= 0) mesesFound++; });
+    if (concatI >= 0 && clienteI >= 0 && mesesFound >= 6) {
+      headerRow = r;
+      idx.concat = concatI;
+      idx.cliente = clienteI;
+      idx.movil = row.indexOf('movil');
+      const findSub_ = function(terms) {
+        for (var t = 0; t < terms.length; t++) { var exact = row.indexOf(terms[t]); if (exact >= 0) return exact; }
+        for (var t = 0; t < terms.length; t++) { for (var k = 0; k < row.length; k++) { if (row[k].indexOf(terms[t]) >= 0) return k; } }
+        return -1;
+      };
+      idx.meta = findSub_(['meta anual', 'meta']);
+      break;
+    }
+  }
+  if (headerRow < 0) { headerRow = 0; idx = { concat: 0, cliente: 1, movil: 3, meta: 19 }; }
+
+  const filas = [];
+  const seen = {};
+  let lastCliente = '';
+  let sinMatchCount = 0;
+
+  for (let i = headerRow + 1; i < values.length; i++) {
+    const row = values[i];
+    const concat = idx.concat >= 0 ? String(row[idx.concat] || '').trim() : '';
+    let cliente = idx.cliente >= 0 ? String(row[idx.cliente] || '').trim() : '';
+    const movil = idx.movil >= 0 ? String(row[idx.movil] || '').trim() : '';
+
+    if (!cliente && (concat || movil) && lastCliente) cliente = lastCliente;
+    else if (cliente) lastCliente = cliente;
+
+    if (!concat && !movil) continue;
+    if (!cliente && !concat) continue;
+    if (esFilaTotal_(concat) || esFilaTotal_(cliente) || esFilaTotal_(movil)) continue;
+
+    const meta = idx.meta >= 0 ? (parseFloat(row[idx.meta]) || 0) : 0;
+
+    let f = null;
+    if (concat) f = flotaPorNombre[concat.toLowerCase()] || flotaPorNombreNorm[normalize_(concat)];
+    if (!f && cliente && movil) {
+      const k1 = (cliente + '|' + movil).toLowerCase();
+      f = flotaPorClienteMovilExacto[k1] || flotaPorClienteMovilNorm[normalize_(cliente + ' ' + movil)];
+    }
+    if (!f && concat) f = subsetMatch_(concat);
+    if (!f && cliente && movil) f = subsetMatch_(cliente + ' ' + movil);
+
+    if (!f) { sinMatchCount++; continue; }
+
+    const outKey = (f.cliente + '|' + f.movil).toLowerCase();
+    if (seen[outKey]) continue;
+    seen[outKey] = true;
+    filas.push({ nombre: f.nombre, cliente: f.cliente, movil: f.movil, meta: meta,
+                 meses: {}, total: 0, meses_sup: 0, pct_movil: 0 });
+  }
+
+  // ── Recalcular meses desde "BBDD Supervisiones" (eventos crudos) ──
+  const bbdd = ss.getSheetByName('BBDD Supervisiones');
+  if (bbdd) {
+    const bv = bbdd.getDataRange().getValues();
+    let bIdxConcat = 2, bIdxFecha = 3, bHeaderRow = 0;
+    for (let r = 0; r < Math.min(bv.length, 8); r++) {
+      const hr = bv[r].map(function(c){ return normalize_(c); });
+      const ci = hr.indexOf('concat');
+      let fi = hr.indexOf('fecha');
+      if (fi < 0) fi = hr.indexOf('fecha supervision');
+      if (fi < 0) fi = hr.indexOf('fecha de supervision');
+      if (ci >= 0 && fi >= 0) { bHeaderRow = r; bIdxConcat = ci; bIdxFecha = fi; break; }
+    }
+    const anioNum = parseInt((SUPERVISIONES_TAB.match(/\d{4}/) || [])[0] || '0', 10);
+    const countByKeyMonth = {};
+    for (let i = bHeaderRow + 1; i < bv.length; i++) {
+      const key = normalize_(bv[i][bIdxConcat]);
+      if (!key) continue;
+      const fecha = parseFlexibleDate(bv[i][bIdxFecha]);
+      if (!fecha || isNaN(fecha.getTime())) continue;
+      if (anioNum && fecha.getFullYear() !== anioNum) continue;
+      if (!countByKeyMonth[key]) countByKeyMonth[key] = [0,0,0,0,0,0,0,0,0,0,0,0];
+      countByKeyMonth[key][fecha.getMonth()]++;
+    }
+    filas.forEach(function(m) {
+      const c = countByKeyMonth[normalize_(m.cliente + ' ' + m.movil)] || countByKeyMonth[normalize_(m.nombre)];
+      if (!c) return;
+      const mm = {};
+      let tot = 0, nMeses = 0;
+      for (let j = 0; j < 12; j++) { mm[meses[j]] = c[j]; tot += c[j]; if (c[j] > 0) nMeses++; }
+      m.meses = mm;
+      m.total = tot;
+      m.meses_sup = nMeses;
+      m.pct_movil = m.meta > 0 ? nMeses / m.meta : 0;
+    });
+  }
+
+  supabaseDeleteAll_('supervisiones_resumen');
+  var BATCH = 500;
+  for (var b = 0; b < filas.length; b += BATCH) {
+    supabaseInsert_('supervisiones_resumen', filas.slice(b, b + BATCH));
+  }
+  Logger.log('sincronizarSupervisionesASupabase: ' + filas.length + ' móviles sincronizados, ' + sinMatchCount + ' filas sin match');
+}
+
+function setupSincronizarSupervisionesTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'sincronizarSupervisionesASupabase') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('sincronizarSupervisionesASupabase').timeBased().everyMinutes(15).create();
+  Logger.log('Trigger instalado: sincronizarSupervisionesASupabase cada 15 min');
 }
 
 // Callable desde google.script.run y desde doGet source=alta_movil
