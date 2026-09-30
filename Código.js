@@ -1946,76 +1946,39 @@ function readPerdidaRutaData(cliente, fechaInicio, fechaFin) {
   if (!fechaInicio || !fechaFin) throw new Error('Rango de fechas inválido');
   const nc = normalize_(cliente || '');
 
-  function enRango(fechaRaw) {
-    var f = parseFlexibleDate(fechaRaw);
-    if (!f) return false;
-    var s = formatDateISO(f);
-    return s >= fechaInicio && s <= fechaFin;
-  }
-
-  function findIdx(headers, name) {
-    var n = name.toLowerCase();
-    for (var j = 0; j < headers.length; j++) {
-      if (headers[j].toLowerCase() === n) return j;
-    }
-    return -1;
-  }
-
   var dbg = {};
 
-  // ── Fase 1: CalendarioTransformado → calMap[normalize(movil)+"|"+fechaISO] = maxPermitidas
+  // ── Fase 1: calendario_planificado (Supabase, sincronizada desde
+  // CalendarioTransformado por sincronizarCalendarioASupabase) →
+  // calMap[normalize(movil)+"|"+fechaISO] = maxPermitidas
   var calMap = {}; // key → { maxPermitidas, movilRaw }
   var planificadas = 0;
   try {
-    const ssGPS    = SpreadsheetApp.openById(SHEETS.informesGPS);
-    const calSheet = ssGPS.getSheetByName('CalendarioTransformado');
-    dbg.calExiste = !!calSheet;
-    if (calSheet && calSheet.getLastRow() > 1) {
-      const calVals    = calSheet.getRange(1, 1, calSheet.getLastRow(), calSheet.getLastColumn()).getValues();
-      const calHeaders = calVals[0].map(function(h){ return String(h).trim(); });
-      dbg.calHeaders   = calHeaders;
-      dbg.calTotalRows = calVals.length - 1;
-      const idxFecha   = findIdx(calHeaders, 'Fecha');
-      const idxCliente = findIdx(calHeaders, 'Cliente');
-      const idxMovil   = idxCliente >= 0 ? -1 : findIdx(calHeaders, 'Móvil');
-      function findHorario(headers, candidates) {
-        for (var c = 0; c < candidates.length; c++) { var ix = findIdx(headers, candidates[c]); if (ix >= 0) return ix; }
-        return -1;
-      }
-      const idxIni1 = findHorario(calHeaders, ['Horario de Inicio 1','Horario de Inicio','Hora de Inicio 1','Hora de Inicio','Inicio 1','Inicio']);
-      const idxFin1 = findHorario(calHeaders, ['Horario de Fin 1','Horario de Fin','Hora de Fin 1','Hora de Fin','Fin 1','Fin']);
-      const idxIni2 = findIdx(calHeaders, 'Horario de Inicio 2');
-      const idxFin2 = findIdx(calHeaders, 'Horario de Fin 2');
-      dbg.calIdxFecha = idxFecha; dbg.calIdxMovil = idxMovil;
-      dbg.calIdxIni1 = idxIni1; dbg.calIdxFin1 = idxFin1;
-      dbg.calIdxIni2 = idxIni2; dbg.calIdxFin2 = idxFin2;
+    const calRows = supabaseSelect_('calendario_planificado',
+      'select=movil,fecha,horario_inicio_1,horario_fin_1,horario_inicio_2,horario_fin_2' +
+      '&fecha=gte.' + fechaInicio + '&fecha=lte.' + fechaFin);
+    dbg.calExiste = true;
+    dbg.calTotalRows = calRows.length;
 
-      for (var i = 1; i < calVals.length; i++) {
-        var row = calVals[i];
-        if (nc) {
-          if (idxCliente >= 0) { if (normalize_(String(row[idxCliente]||'')) !== nc) continue; }
-          else if (idxMovil >= 0) { if (normalize_(String(row[idxMovil]||'')).indexOf(nc) === -1) continue; }
-        }
-        var fechaRawCal = row[idxFecha >= 0 ? idxFecha : 0];
-        if (!enRango(fechaRawCal)) continue;
-        var fechaISOCal = formatDateISO(parseFlexibleDate(fechaRawCal));
-        var movilRaw    = idxMovil >= 0 ? String(row[idxMovil]||'').trim() : (idxCliente >= 0 ? String(row[idxCliente]||'').trim() : '');
-        var calKey      = normalize_(movilRaw) + '|' + fechaISOCal;
-        var entry = calMap[calKey] || { maxPermitidas: 0, movilRaw: movilRaw };
-        entry.maxPermitidas++;
-        planificadas++;
-        // Segunda ruta fuera del horario de la primera → una más
-        var ini2 = idxIni2 >= 0 ? parseHHMM(row[idxIni2]) : null;
-        var fin2 = idxFin2 >= 0 ? parseHHMM(row[idxFin2]) : null;
-        if (ini2 !== null && fin2 !== null) {
-          var ini1 = idxIni1 >= 0 ? parseHHMM(row[idxIni1]) : null;
-          var fin1 = idxFin1 >= 0 ? parseHHMM(row[idxFin1]) : null;
-          var dentro = ini1 !== null && fin1 !== null && ini2 >= ini1 && fin2 <= fin1;
-          if (!dentro) { entry.maxPermitidas++; planificadas++; }
-        }
-        calMap[calKey] = entry;
+    calRows.forEach(function(row) {
+      var movilRaw = row.movil || '';
+      if (nc && normalize_(movilRaw).indexOf(nc) === -1) return;
+      var fechaISOCal = row.fecha;
+      var calKey = normalize_(movilRaw) + '|' + fechaISOCal;
+      var entry = calMap[calKey] || { maxPermitidas: 0, movilRaw: movilRaw };
+      entry.maxPermitidas++;
+      planificadas++;
+      // Segunda ruta fuera del horario de la primera → una más
+      var ini2 = parseHHMM(row.horario_inicio_2);
+      var fin2 = parseHHMM(row.horario_fin_2);
+      if (ini2 !== null && fin2 !== null) {
+        var ini1 = parseHHMM(row.horario_inicio_1);
+        var fin1 = parseHHMM(row.horario_fin_1);
+        var dentro = ini1 !== null && fin1 !== null && ini2 >= ini1 && fin2 <= fin1;
+        if (!dentro) { entry.maxPermitidas++; planificadas++; }
       }
-    }
+      calMap[calKey] = entry;
+    });
   } catch(e) { Logger.log('readPerdidaRuta calMap: ' + e); dbg.calError = String(e); }
 
   // ── Fase 2: Finalizados (Supabase) → finMap[normalize(cliente+" "+notacion)+"|"+fechaISO] = { count, movilRaw, fechaISO }
@@ -3044,42 +3007,29 @@ function readSegundaRuta(fechaParam) {
   if (!fechaTarget || isNaN(fechaTarget.getTime())) return { moviles: [], fecha: '' };
   const fechaISO = formatDateISO(fechaTarget);
 
-  const ssGPS = SpreadsheetApp.openById(SHEETS.informesGPS);
-  const calSheet = ssGPS.getSheetByName('CalendarioTransformado');
-  if (!calSheet) return { moviles: [], fecha: fechaISO };
-
-  const calVals = calSheet.getDataRange().getValues();
-  if (calVals.length < 2) return { moviles: [], fecha: fechaISO };
-
-  const calHeaders = calVals[0].map(function(h) { return String(h).trim(); });
-  const calIdx = {};
-  calHeaders.forEach(function(h, i) { calIdx[h] = i; });
+  const calRows = supabaseSelect_('calendario_planificado',
+    'select=movil,horario_inicio_1,horario_fin_1,horario_inicio_2,horario_fin_2&fecha=eq.' + fechaISO);
 
   const conSegundaRuta = [];
-  for (let i = 1; i < calVals.length; i++) {
-    const row = calVals[i];
-    const fechaRaw = row[calIdx['Fecha']];
-    if (!fechaRaw) continue;
-    const fecha = parseFlexibleDate(fechaRaw);
-    if (!fecha || formatDateISO(fecha) !== fechaISO) continue;
-    const horaInicio2 = String(row[calIdx['Horario de Inicio 2']] || '').trim();
-    if (!horaInicio2) continue;
-    const horaFin2 = String(row[calIdx['Horario de Fin 2']] || '').trim();
+  calRows.forEach(function(row) {
+    const horaInicio2 = row.horario_inicio_2 || '';
+    if (!horaInicio2) return;
+    const horaFin2 = row.horario_fin_2 || '';
     // Verificar si la 2ª ruta está dentro del horario de la 1ª → si es así, no es segunda ruta real
-    const ini1 = parseHHMM(row[calIdx['Horario de Inicio 1']]);
-    const fin1 = parseHHMM(row[calIdx['Horario de Fin 1']]);
+    const ini1 = parseHHMM(row.horario_inicio_1);
+    const fin1 = parseHHMM(row.horario_fin_1);
     const ini2 = parseHHMM(horaInicio2);
     const fin2 = parseHHMM(horaFin2);
     // Si faltan horarios de la 1ª ruta → tratar como 1ª ruta solamente (no agregar)
-    if (ini1 === null || fin1 === null) continue;
+    if (ini1 === null || fin1 === null) return;
     // Si la 2ª está completamente dentro de la 1ª → no es segunda ruta real
-    if (ini2 !== null && fin2 !== null && ini2 >= ini1 && fin2 <= fin1) continue;
+    if (ini2 !== null && fin2 !== null && ini2 >= ini1 && fin2 <= fin1) return;
     conSegundaRuta.push({
-      nombre: String(row[calIdx['Móvil']] || '').trim(),
+      nombre: row.movil || '',
       horaInicio2: horaInicio2,
       horaFin2: horaFin2
     });
-  }
+  });
 
   if (conSegundaRuta.length === 0) return { moviles: [], fecha: fechaISO };
 
@@ -3891,6 +3841,78 @@ function setupSincronizarFlotaTrigger() {
   });
   ScriptApp.newTrigger('sincronizarFlotaASupabase').timeBased().everyMinutes(5).create();
   Logger.log('Trigger instalado: sincronizarFlotaASupabase cada 5 min');
+}
+
+// Borra todas las filas de una tabla (DELETE con un filtro que matchea todo).
+// PostgREST exige al menos un filtro para DELETE; `id=not.is.null` matchea
+// cualquier fila sin asumir nada sobre el resto de las columnas.
+function supabaseDeleteAll_(table) {
+  const cfg = supabaseConfig_();
+  const resp = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table + '?id=not.is.null', {
+    method: 'delete',
+    headers: { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key, Prefer: 'return=minimal' },
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  if (code >= 400) {
+    throw new Error('Supabase delete-all (' + table + '): HTTP ' + code + ' — ' + resp.getContentText());
+  }
+}
+
+// ============================================================================
+// SINCRONIZACIÓN: CalendarioTransformado (Sheet) → Supabase (calendario_planificado)
+// ============================================================================
+// Alimenta readSegundaRuta() y la Fase 1 de readPerdidaRutaData(). El sheet no
+// garantiza una sola fila por móvil+fecha, así que en vez de upsert se borra
+// todo y se reinserta en cada corrida — barato, es un calendario de
+// planificación, no un histórico que crece sin límite.
+//
+// SETUP (una sola vez): correr "setupSincronizarCalendarioTrigger" desde el editor.
+function sincronizarCalendarioASupabase() {
+  const ssGPS = SpreadsheetApp.openById(SHEETS.informesGPS);
+  const calSheet = ssGPS.getSheetByName('CalendarioTransformado');
+  if (!calSheet) { Logger.log('sincronizarCalendarioASupabase: hoja no encontrada'); return; }
+
+  const calVals = calSheet.getDataRange().getValues();
+  if (calVals.length < 2) { Logger.log('sincronizarCalendarioASupabase: hoja vacía'); return; }
+
+  const calHeaders = calVals[0].map(function(h){ return String(h).trim(); });
+  const calIdx = {};
+  calHeaders.forEach(function(h, i){ calIdx[h] = i; });
+
+  var rows = [];
+  for (var i = 1; i < calVals.length; i++) {
+    var row = calVals[i];
+    var fechaRaw = row[calIdx['Fecha']];
+    if (!fechaRaw) continue;
+    var fecha = parseFlexibleDate(fechaRaw);
+    if (!fecha || isNaN(fecha.getTime())) continue;
+    var movil = String(row[calIdx['Móvil']] || '').trim();
+    if (!movil) continue;
+    rows.push({
+      fecha: formatDateISO(fecha),
+      movil: movil,
+      horario_inicio_1: String(row[calIdx['Horario de Inicio 1']] || '').trim(),
+      horario_fin_1: String(row[calIdx['Horario de Fin 1']] || '').trim(),
+      horario_inicio_2: String(row[calIdx['Horario de Inicio 2']] || '').trim(),
+      horario_fin_2: String(row[calIdx['Horario de Fin 2']] || '').trim()
+    });
+  }
+
+  supabaseDeleteAll_('calendario_planificado');
+  var BATCH = 500;
+  for (var b = 0; b < rows.length; b += BATCH) {
+    supabaseInsert_('calendario_planificado', rows.slice(b, b + BATCH));
+  }
+  Logger.log('sincronizarCalendarioASupabase: sincronizadas ' + rows.length + ' filas');
+}
+
+function setupSincronizarCalendarioTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'sincronizarCalendarioASupabase') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('sincronizarCalendarioASupabase').timeBased().everyMinutes(15).create();
+  Logger.log('Trigger instalado: sincronizarCalendarioASupabase cada 15 min');
 }
 
 // Callable desde google.script.run y desde doGet source=alta_movil
