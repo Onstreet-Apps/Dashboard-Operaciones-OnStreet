@@ -1878,8 +1878,36 @@ function getCached(key, fn, durationSec) {
   const json = JSON.stringify(data);
   if (json.length < CACHE_MAX_BYTES) {
     try { cache.put(cacheKey, json, durationSec || CACHE_DURATION_SECONDS); } catch (e) {}
+  } else {
+    Logger.log('⚠️ getCached: "' + key + '" pesa ' + json.length + ' bytes, no cabe en caché (límite ' + CACHE_MAX_BYTES + ') — se recalcula siempre');
   }
   return data;
+}
+
+// Corre esto UNA VEZ desde el editor (Ejecutar) para saber, con datos reales,
+// qué partes del dashboard pesan demasiado para cachear y/o tardan mucho en
+// calcularse. Con esto se decide dónde realmente conviene migrar a Supabase,
+// en vez de adivinar.
+function diagnosticoRendimiento() {
+  var flotaInfo = readFlota();
+  function medir(nombre, fn) {
+    var t0 = new Date().getTime();
+    var data;
+    try { data = fn(); } catch (e) { Logger.log('❌ ' + nombre + ': ERROR — ' + e); return; }
+    var ms = new Date().getTime() - t0;
+    var bytes = JSON.stringify(data).length;
+    var cabeEnCache = bytes < CACHE_MAX_BYTES;
+    Logger.log((cabeEnCache ? '✅' : '🚫') + ' ' + nombre + ': ' + ms + ' ms, ' + bytes + ' bytes' +
+      (cabeEnCache ? '' : ' — NO CABE EN CACHÉ (límite ' + CACHE_MAX_BYTES + '), se recalcula siempre'));
+  }
+  Logger.log('=== Diagnóstico de rendimiento (' + flotaInfo.flota.length + ' móviles en Flota) ===');
+  medir('unificador (Operación)', function(){ return readUnificador(flotaInfo, null); });
+  medir('historico (Finalizados)', function(){ return readFinalizados(null); });
+  medir('supervisiones', function(){ return readSupervisiones(flotaInfo); });
+  medir('bitacora', function(){ return readBitacora(null); });
+  medir('kilometros', function(){ return readKilometros(flotaInfo); });
+  medir('gps', function(){ return readGPS(flotaInfo); });
+  Logger.log('=== Fin del diagnóstico ===');
 }
 
 // Normaliza un string: lowercase, sin tildes, sin paréntesis, espacios colapsados
