@@ -108,6 +108,15 @@ function doGet(e) {
         gps:        safeRead(function() { return getCached('gps', function() { return readGPS(flotaInfo); }, CACHE_GPS_SECONDS); }, null),
         historico:  safeRead(function() { return getCached('historico_' + fechaSuffix, function() { return readFinalizados(fechaParam); }, CACHE_DURATION_SECONDS); }, null),
         supervisiones: safeRead(function() { return getCached('supervisiones', function() { return readSupervisiones(flotaInfo); }, CACHE_DURATION_SECONDS); }, null),
+        mondaySupervisiones: safeRead(function() { return readMondayConsolidado_(); }, {}),
+        mondayPlanes: safeRead(function() {
+          var chk      = safeRead(function() { return readMondayChecklists_(); }, { planes: [], colEstadoId: null });
+          var rapida   = safeRead(function() { return readMondayRapida_(); }, []);
+          var integral = safeRead(function() { return readMondayIntegral_(); }, []);
+          var todos    = rapida.concat(integral).concat(chk.planes);
+          todos.sort(function(a, b) { return (b.fecha || '').localeCompare(a.fecha || ''); });
+          return { planes: todos, colEstadoId: chk.colEstadoId };
+        }, { planes: [], colEstadoId: null }),
         bitacora:   safeRead(function() { return getCached('bitacora_' + fechaSuffix, function() { return readBitacora(fechaParam); }, CACHE_DURATION_SECONDS); }, null),
         segundaRuta: safeRead(function() { return getCached('segunda_ruta_' + fechaSuffix, function() { return readSegundaRuta(fechaParam); }, CACHE_DURATION_SECONDS); }, null),
         // kilómetros se carga bajo demanda vía source=kilometros para no ralentizar la carga inicial
@@ -366,6 +375,15 @@ function getDashboardData(params) {
     gps:          safeRead(function() { return getCached('gps',                          function() { return readGPS(flotaInfo); },                      CACHE_GPS_SECONDS); },     null),
     historico:    safeRead(function() { return getCached('historico_'    + fechaSuffix, function() { return readFinalizados(fechaParam); },              CACHE_DURATION_SECONDS); }, null),
     supervisiones:safeRead(function() { return getCached('supervisiones',               function() { return readSupervisiones(flotaInfo); },             CACHE_DURATION_SECONDS); }, null),
+    mondaySupervisiones: safeRead(function() { return readMondayConsolidado_(); }, {}),
+    mondayPlanes: safeRead(function() {
+      var chk      = safeRead(function() { return readMondayChecklists_(); }, { planes: [], colEstadoId: null });
+      var rapida   = safeRead(function() { return readMondayRapida_(); }, []);
+      var integral = safeRead(function() { return readMondayIntegral_(); }, []);
+      var todos    = rapida.concat(integral).concat(chk.planes);
+      todos.sort(function(a, b) { return (b.fecha || '').localeCompare(a.fecha || ''); });
+      return { planes: todos, colEstadoId: chk.colEstadoId };
+    }, { planes: [], colEstadoId: null }),
     bitacora:     safeRead(function() { return getCached('bitacora_'     + fechaSuffix, function() { return readBitacora(fechaParam); },                 CACHE_DURATION_SECONDS); }, null),
     segundaRuta:  safeRead(function() { return getCached('segunda_ruta_' + fechaSuffix, function() { return readSegundaRuta(fechaParam); },              CACHE_DURATION_SECONDS); }, null),
     kams: flotaInfo.kams || [],

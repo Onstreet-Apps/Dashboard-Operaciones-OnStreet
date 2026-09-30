@@ -1669,70 +1669,38 @@ function loadData(){
     return true;
   }
 
-  // Las 4 secciones se piden en paralelo (antes iban encadenadas una tras otra,
-  // así que el tiempo total era la SUMA de las cuatro en vez del máximo).
-  var pasosRestantes=4;
-  function pasoTerminado(){
-    pasosRestantes--;
-    if(pasosRestantes>0){ setStatus('loading','Cargando datos... ('+(4-pasosRestantes)+'/4)'); return; }
+  // Una sola llamada trae todo (Operación, GPS, Histórico, Bitácora,
+  // Supervisiones + Monday). Se probó pedirlas por separado —encadenadas y
+  // en paralelo— pero Apps Script encola las ejecuciones concurrentes contra
+  // el mismo proyecto, así que 4 llamadas (aunque se disparen juntas) igual
+  // terminan sumando sus tiempos. Una sola ejecución evita esa cola.
+  var onOk=function(d){
+    if(!d){setStatus('error','Sin datos recibidos');return;}
+    if(!merge(d)){setStatus('error','Error de autenticación');return;}
+    populateKamSelector();
+    if(allData.unificador) renderOperacion();
+    if(allData.historico) renderHistorico();
+    if(allData.unificador||allData.historico) renderTendencias();
+    if(allData.unificador) renderDetalleOperacion();
+    renderBannerDormidos();
+    if(allData.gps) renderGPS();
+    if(allData.bitacora) renderBitacora();
+    if(allData.supervisiones) renderSupervisiones();
+    renderMondaySupervisiones();
+    renderMondayPlanes();
+    initNotifications();
     var ts=new Date(allData.lastUpdated||Date.now());
     var msg='Actualizado a las '+ts.toLocaleTimeString('es-CL',{hour:'2-digit',minute:'2-digit'});
     if(fechaGlobal) msg+=' · viendo '+formatDate(fechaGlobal);
     setStatus('ok',msg);
+  };
+  var onErr=function(err){setStatus('error','Error al cargar: '+(err&&err.message?err.message:String(err)));};
+
+  if(IS_GAS){
+    google.script.run.withSuccessHandler(onOk).withFailureHandler(onErr).getDashboardData(p);
+  } else {
+    authFetch('all',p).then(onOk).catch(onErr);
   }
-
-  (function cargarOperacion(){
-    var onOk=function(d){
-      if(merge(d)){
-        populateKamSelector();
-        if(allData.unificador) renderOperacion();
-        if(allData.historico) renderHistorico();
-        if(allData.unificador||allData.historico) renderTendencias();
-        if(allData.unificador) renderDetalleOperacion();
-        renderBannerDormidos();
-      }
-      pasoTerminado();
-    };
-    if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabOperacion(p);
-    } else {
-      authFetch('tab_operacion',p).then(onOk).catch(pasoTerminado);
-    }
-  })();
-
-  (function cargarGps(){
-    var onOk=function(d){ merge(d); if(allData.gps) renderGPS(); pasoTerminado(); };
-    if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabGps(p);
-    } else {
-      authFetch('tab_gps',p).then(onOk).catch(pasoTerminado);
-    }
-  })();
-
-  (function cargarBitacora(){
-    var onOk=function(d){ merge(d); if(allData.bitacora) renderBitacora(); pasoTerminado(); };
-    if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabBitacora(p);
-    } else {
-      authFetch('tab_bitacora',p).then(onOk).catch(pasoTerminado);
-    }
-  })();
-
-  (function cargarSupervisiones(){
-    var onOk=function(d){
-      merge(d);
-      if(allData.supervisiones) renderSupervisiones();
-      renderMondaySupervisiones();
-      renderMondayPlanes();
-      initNotifications();
-      pasoTerminado();
-    };
-    if(IS_GAS){
-      google.script.run.withSuccessHandler(onOk).withFailureHandler(pasoTerminado).getTabSupervisiones(p);
-    } else {
-      authFetch('tab_supervisiones',p).then(onOk).catch(pasoTerminado);
-    }
-  })();
 }
 
 function setStatus(state,msg){
