@@ -3182,16 +3182,6 @@ function readSupervisiones(flotaInfo) {
 // LECTOR: BITÁCORA
 // ============================================================================
 function readBitacora(fechaFinParam) {
-  const ss = SpreadsheetApp.openById(SHEETS.bitacora);
-  const sheet = ss.getSheetByName('BBDD Bitácora') || ss.getSheets()[0];
-  const values = sheet.getDataRange().getValues();
-  if (values.length < 2) return { eventos: [], totalVentana: 0, desde: '', hasta: formatDateISO(new Date()), ventanaMeses: BITACORA_MONTHS_BACK };
-
-  const headers = values[0];
-  const idx = {};
-  headers.forEach((h, i) => { idx[String(h).trim()] = i; });
-
-  // Ventana: fija desde el 1 de enero de 2025 hasta fechaFinParam (o hoy)
   const fechaFin = fechaFinParam ? parseFlexibleDate(fechaFinParam) : new Date();
   if (!fechaFin || isNaN(fechaFin.getTime())) throw new Error('Fecha inválida en readBitacora: ' + fechaFinParam);
   fechaFin.setHours(23, 59, 59, 999);
@@ -3201,68 +3191,71 @@ function readBitacora(fechaFinParam) {
   // Ventana ampliada para Contingencias: desde el 1 de enero del año pasado hasta fechaFin
   const cutoffConting = new Date(fechaFin.getFullYear() - 1, 0, 1);
 
+  // Una sola consulta cubre ambas ventanas (eventos + contingenciasDetalle):
+  // desde la más antigua de las dos hasta fechaFin. El conteo mensual de
+  // Contingencia sobre TODO el histórico se resuelve aparte, vía RPC
+  // (agregado en Postgres — instantáneo aunque el histórico crezca por años).
+  const desdeAmplio = cutoff < cutoffConting ? cutoff : cutoffConting;
+  const fechaFinISO = formatDateISO(fechaFin);
+  const cutoffISO = formatDateISO(cutoff);
+  const cutoffContingISO = formatDateISO(cutoffConting);
+
+  const filas = supabaseSelect_('bitacora_eventos',
+    'select=fecha,mes,anio,cliente,sucursal,conductor,responsable,tipo,detalle,kam' +
+    '&fecha=gte.' + formatDateISO(desdeAmplio) + '&fecha=lte.' + fechaFinISO +
+    '&order=fecha.desc&limit=5000');
+
   const eventos = [];
   const contingenciasDetalle = [];
-  // Conteo mensual de "Contingencia" sobre TODO el histórico (no acotado a la ventana de 12 meses)
-  const contingPorMes = {}; // 'YYYY-MM' -> total
 
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const fechaRaw = row[idx['Fecha']];
-    if (!fechaRaw) continue;
-    const fecha = parseFlexibleDate(fechaRaw);
-    if (!fecha || isNaN(fecha.getTime())) continue;
-
+  filas.forEach(function(r) {
+    const fechaISO = r.fecha;
+    const tipoRaw = r.tipo || '';
     // La columna "Tipo de Acontecimiento" puede traer varios tipos separados por coma
     // (ej. "Contingencia, Atraso") — se separan para que cada uno cuente donde corresponde.
-    const tipoRaw = String(row[idx['Tipo de Acontecimiento']] || '').trim();
     const tipos = tipoRaw.split(',').map(function(t){ return t.trim(); }).filter(Boolean);
     const esContingencia = tipos.indexOf('Contingencia') >= 0;
 
-    if (esContingencia) {
-      const key = fecha.getFullYear() + '-' + String(fecha.getMonth() + 1).padStart(2, '0');
-      contingPorMes[key] = (contingPorMes[key] || 0) + 1;
-
-      if (fecha >= cutoffConting && fecha <= fechaFin) {
-        contingenciasDetalle.push({
-          fecha: formatDateISO(fecha),
-          cliente: String(row[idx['Cliente']] || '').trim(),
-          sucursal: String(row[idx['Sucursal']] || '').trim(),
-          responsable: String(row[idx['Responsable']] || '').trim(),
-          detalle: String(row[idx['Detalle Acontecimiento']] || '').trim().slice(0, 150),
-          kam: String(row[idx['KAM']] || '').trim()
-        });
-      }
+    if (esContingencia && fechaISO >= cutoffContingISO && fechaISO <= fechaFinISO) {
+      contingenciasDetalle.push({
+        fecha: fechaISO,
+        cliente: r.cliente || '',
+        sucursal: r.sucursal || '',
+        responsable: r.responsable || '',
+        detalle: (r.detalle || '').slice(0, 150),
+        kam: r.kam || ''
+      });
     }
 
-    if (fecha < cutoff || fecha > fechaFin) continue;
+    if (fechaISO < cutoffISO || fechaISO > fechaFinISO) return;
 
     eventos.push({
-      fecha: formatDateISO(fecha),
-      mes: row[idx['Mes']] || (fecha.getMonth() + 1),
-      anio: row[idx['Año']] || fecha.getFullYear(),
-      cliente: String(row[idx['Cliente']] || '').trim(),
-      sucursal: String(row[idx['Sucursal']] || '').trim(),
-      conductor: String(row[idx['Conductor']] || '').trim().slice(0, 60),
-      responsable: String(row[idx['Responsable']] || '').trim(),
+      fecha: fechaISO,
+      mes: r.mes || parseInt(fechaISO.slice(5, 7), 10),
+      anio: r.anio || parseInt(fechaISO.slice(0, 4), 10),
+      cliente: r.cliente || '',
+      sucursal: r.sucursal || '',
+      conductor: (r.conductor || '').slice(0, 60),
+      responsable: r.responsable || '',
       tipo: tipoRaw,
       tipos: tipos,
-      detalle: String(row[idx['Detalle Acontecimiento']] || '').trim().slice(0, 150),
-      kam: String(row[idx['KAM']] || '').trim()
+      detalle: (r.detalle || '').slice(0, 150),
+      kam: r.kam || ''
     });
-  }
+  });
+
   eventos.sort((a, b) => b.fecha.localeCompare(a.fecha));
   contingenciasDetalle.sort((a, b) => b.fecha.localeCompare(a.fecha));
 
-  const contingenciasPorMes = Object.keys(contingPorMes).sort().map(function(key) {
-    return { mes: key, total: contingPorMes[key] };
-  });
+  let contingenciasPorMes = [];
+  try { contingenciasPorMes = supabaseRpc_('contingencias_por_mes', {}) || []; }
+  catch (e) { Logger.log('contingencias_por_mes error: ' + e); }
 
   return {
     eventos: eventos.slice(0, 500),
     totalVentana: eventos.length,
     desde: formatDateISO(cutoff),
-    hasta: formatDateISO(fechaFin),
+    hasta: fechaFinISO,
     ventanaMeses: BITACORA_MONTHS_BACK,
     contingenciasPorMes: contingenciasPorMes,
     contingenciasDetalle: contingenciasDetalle.slice(0, 500)
@@ -4190,6 +4183,84 @@ function crearTriggerArchivar() {
     .atHour(1)
     .create();
   Logger.log('Trigger creado: archivarFinalizados correrá cada día a la 1 AM.');
+}
+
+// ============================================================================
+// SINCRONIZACIÓN: BBDD Bitácora (Zapier/Monday → Sheets) → Supabase
+// ============================================================================
+// La planilla "BBDD Bitácora" la llena Zapier, no Apps Script — así que en
+// vez de generar los datos nosotros (como con Finalizados), este trigger
+// copia a Supabase las filas nuevas que Zapier ya escribió. Es incremental:
+// recuerda hasta qué fila llegó la última vez (Propiedades del script) y la
+// próxima corrida solo copia lo nuevo. La primera corrida migra todo el
+// histórico existente (en lotes, igual que backfillFinalizadosASupabase).
+//
+// SETUP (una sola vez): correr "setupSincronizarBitacoraTrigger" desde el
+// editor. Eso instala el trigger cada 15 minutos.
+function sincronizarBitacoraASupabase() {
+  const props = PropertiesService.getScriptProperties();
+  const KEY = 'BITACORA_ULTIMA_FILA_SYNC';
+  const ultimaFilaSync = parseInt(props.getProperty(KEY) || '1', 10); // fila 1 = headers
+
+  const ss = SpreadsheetApp.openById(SHEETS.bitacora);
+  const sheet = ss.getSheetByName('BBDD Bitácora') || ss.getSheets()[0];
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= ultimaFilaSync) {
+    Logger.log('sincronizarBitacoraASupabase: nada nuevo (última fila ' + lastRow + ')');
+    return;
+  }
+
+  const lastCol = sheet.getLastColumn();
+  const headerRow = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(h){ return String(h || '').trim(); });
+  const idx = {};
+  headerRow.forEach(function(h, i){ idx[h] = i; });
+
+  const numNuevas = lastRow - ultimaFilaSync;
+  const values = sheet.getRange(ultimaFilaSync + 1, 1, numNuevas, lastCol).getValues();
+
+  const BATCH = 500;
+  let batch = [];
+  let total = 0;
+
+  function flush() {
+    if (!batch.length) return;
+    supabaseInsert_('bitacora_eventos', batch);
+    total += batch.length;
+    batch = [];
+  }
+
+  values.forEach(function(row) {
+    const fechaRaw = row[idx['Fecha']];
+    const fecha = fechaRaw ? parseFlexibleDate(fechaRaw) : null;
+    if (!fecha || isNaN(fecha.getTime())) return;
+
+    batch.push({
+      fecha: formatDateISO(fecha),
+      mes: row[idx['Mes']] || (fecha.getMonth() + 1),
+      anio: row[idx['Año']] || fecha.getFullYear(),
+      cliente: String(row[idx['Cliente']] || '').trim(),
+      sucursal: String(row[idx['Sucursal']] || '').trim(),
+      conductor: String(row[idx['Conductor']] || '').trim(),
+      responsable: String(row[idx['Responsable']] || '').trim(),
+      tipo: String(row[idx['Tipo de Acontecimiento']] || '').trim(),
+      detalle: String(row[idx['Detalle Acontecimiento']] || '').trim(),
+      kam: String(row[idx['KAM']] || '').trim()
+    });
+
+    if (batch.length >= BATCH) flush();
+  });
+  flush();
+
+  props.setProperty(KEY, String(lastRow));
+  Logger.log('sincronizarBitacoraASupabase: sincronizadas ' + total + ' filas nuevas (hasta fila ' + lastRow + ' de la planilla)');
+}
+
+function setupSincronizarBitacoraTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'sincronizarBitacoraASupabase') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('sincronizarBitacoraASupabase').timeBased().everyMinutes(15).create();
+  Logger.log('Trigger instalado: sincronizarBitacoraASupabase cada 15 min');
 }
 
 // ============================================================
