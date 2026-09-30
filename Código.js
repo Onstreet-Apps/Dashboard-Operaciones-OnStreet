@@ -2161,65 +2161,41 @@ function normalize_(s) {
 // ============================================================================
 // LECTOR: FLOTA
 // ============================================================================
+// Lee de Supabase (tabla `moviles`) en vez de abrir la Sheet en cada doGet —
+// sincronizarFlotaASupabase() mantiene `moviles` al día cada 5 min a partir
+// de la pestaña "Flota", que el staff sigue editando exactamente igual que
+// siempre (ver ese trigger más abajo, junto a las funciones de Supabase).
+//
+// `nombre` ya no sale de una columna separada de la Sheet ("Nombre Móvil"):
+// en la práctica esa columna casi siempre terminaba repitiendo el valor de
+// "Móvil", así que se arma igual que el fallback que ya usaba esta función
+// (cliente + ' ' + movil).
 function readFlota() {
-  const ss = SpreadsheetApp.openById(SHEETS.unificador);
-  const sheet = ss.getSheetByName('Flota');
-  if (!sheet) throw new Error('Pestaña "Flota" no encontrada');
-
-  const values = sheet.getDataRange().getValues();
-  if (values.length < 2) return { flota: [], jefePorMovil: {}, jefePorNombre: {} };
-
-  // Lookup case-insensitive + sin tildes para mayor robustez
-  const headers = values[0].map(h => String(h || '').trim());
-  const headersN = headers.map(h => normalize_(h));
-  function col(names) {
-    for (let i = 0; i < names.length; i++) {
-      const idx = headersN.indexOf(normalize_(names[i]));
-      if (idx >= 0) return idx;
-    }
-    return -1;
-  }
-  const fIdx = {
-    cliente:       col(['Cliente', 'CLIENTE']),
-    movil:         col(['Móvil', 'MÓVIL', 'Movil', 'MOVIL']),
-    conductor:     col(['Conductor', 'CONDUCTOR', 'Nombre Conductor']),
-    kam:           col(['KAM', 'Kam', 'Jefe Operaciones']),
-    sucursal:      col(['Sucursal', 'SUCURSAL']),
-    movilCompleto: col(['Movil', 'Nombre Móvil', 'Nombre Movil'])
-  };
-
-  if (fIdx.cliente === -1 || fIdx.movil === -1) throw new Error('Columnas Cliente/Móvil no encontradas en Flota. Headers: ' + headers.slice(0, 10).join(', '));
+  const rows = supabaseSelect_('moviles',
+    'select=cliente,movil,sucursal,kam,conductor_actual&estado=neq.dado_de_baja&order=cliente.asc');
 
   const flota = [];
-  const flotaSet = {};
   const jefePorMovil = {};
   const jefePorNombre = {};
 
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const cliente = String(row[fIdx.cliente] || '').trim();
-    const movil = String(row[fIdx.movil] || '').trim();
-    if (!cliente || !movil) continue;
-
+  rows.forEach(function(r) {
+    const cliente = r.cliente || '';
+    const movil = r.movil || '';
+    if (!cliente || !movil) return;
+    const nombre = cliente + ' ' + movil;
+    const kam = r.kam || '';
     const key = (cliente + '|' + movil).toLowerCase();
-    if (flotaSet[key]) continue;
-    flotaSet[key] = true;
-
-    const nombre = fIdx.movilCompleto >= 0
-      ? String(row[fIdx.movilCompleto] || (cliente + ' ' + movil)).trim()
-      : (cliente + ' ' + movil);
-    const kam = fIdx.kam >= 0 ? String(row[fIdx.kam] || '').trim() : '';
 
     flota.push({
       cliente: cliente, movil: movil, nombre: nombre,
-      conductor: fIdx.conductor >= 0 ? String(row[fIdx.conductor] || '').trim() : '',
+      conductor: r.conductor_actual || '',
       kam: kam, jefeOperaciones: kam,
-      sucursal: fIdx.sucursal >= 0 ? String(row[fIdx.sucursal] || '').trim() : ''
+      sucursal: r.sucursal || ''
     });
 
     jefePorMovil[key] = kam;
     if (nombre) jefePorNombre[nombre.toLowerCase()] = kam;
-  }
+  });
 
   // Lista única de KAMs (para el selector global del dashboard)
   const kamsSet = {};
@@ -3823,6 +3799,98 @@ function supabaseInsert_(table, rows) {
   if (code >= 400) {
     throw new Error('Supabase insert (' + table + '): HTTP ' + code + ' — ' + resp.getContentText());
   }
+}
+
+// Inserta o actualiza (POST con on_conflict=merge-duplicates). Para sincronizar
+// una hoja que un humano puede seguir editando (ej. Flota): cada fila que ya
+// existe (mismo valor en `onConflictCols`) se actualiza con los campos nuevos
+// en vez de duplicarse.
+function supabaseUpsert_(table, rows, onConflictCols) {
+  if (!rows || !rows.length) return;
+  const cfg = supabaseConfig_();
+  const url = cfg.url + '/rest/v1/' + table + '?on_conflict=' + onConflictCols.join(',');
+  const resp = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key, Prefer: 'resolution=merge-duplicates,return=minimal' },
+    payload: JSON.stringify(rows),
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  if (code >= 400) {
+    throw new Error('Supabase upsert (' + table + '): HTTP ' + code + ' — ' + resp.getContentText());
+  }
+}
+
+// ============================================================================
+// SINCRONIZACIÓN: Flota (Sheet) → Supabase (moviles)
+// ============================================================================
+// El staff sigue editando la pestaña "Flota" igual que siempre — este trigger
+// solo copia lo que hay ahí hacia `moviles` (upsert por cliente+movil), para
+// que readFlota() deje de abrir la Sheet en cada doGet. Ojo: NO manda `estado`
+// en el upsert — esa columna la maneja Alta/Baja de Móvil (altaMovil/bajaMovil)
+// directamente en Supabase, y si la pisáramos acá un móvil ya dado de baja
+// volvería a aparecer "activo" con solo seguir listado en la Sheet.
+//
+// SETUP (una sola vez): correr "setupSincronizarFlotaTrigger" desde el editor.
+function sincronizarFlotaASupabase() {
+  const ss = SpreadsheetApp.openById(SHEETS.unificador);
+  const sheet = ss.getSheetByName('Flota');
+  if (!sheet) throw new Error('Pestaña "Flota" no encontrada');
+
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) { Logger.log('sincronizarFlotaASupabase: hoja vacía'); return; }
+
+  const headers = values[0].map(function(h){ return String(h || '').trim(); });
+  const headersN = headers.map(function(h){ return normalize_(h); });
+  function col(names) {
+    for (var i = 0; i < names.length; i++) {
+      var idx = headersN.indexOf(normalize_(names[i]));
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+  const fIdx = {
+    cliente:   col(['Cliente', 'CLIENTE']),
+    movil:     col(['Móvil', 'MÓVIL', 'Movil', 'MOVIL']),
+    conductor: col(['Conductor', 'CONDUCTOR', 'Nombre Conductor']),
+    kam:       col(['KAM', 'Kam', 'Jefe Operaciones']),
+    sucursal:  col(['Sucursal', 'SUCURSAL'])
+  };
+  if (fIdx.cliente === -1 || fIdx.movil === -1) throw new Error('Columnas Cliente/Móvil no encontradas en Flota');
+
+  var seen = {};
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    var row = values[i];
+    var cliente = String(row[fIdx.cliente] || '').trim();
+    var movil = String(row[fIdx.movil] || '').trim();
+    if (!cliente || !movil) continue;
+    var key = (cliente + '|' + movil).toLowerCase();
+    if (seen[key]) continue;
+    seen[key] = true;
+    rows.push({
+      cliente: cliente,
+      movil: movil,
+      sucursal: fIdx.sucursal >= 0 ? String(row[fIdx.sucursal] || '').trim() : '',
+      kam: fIdx.kam >= 0 ? String(row[fIdx.kam] || '').trim() : '',
+      conductor_actual: fIdx.conductor >= 0 ? String(row[fIdx.conductor] || '').trim() : ''
+    });
+  }
+
+  var BATCH = 500;
+  for (var b = 0; b < rows.length; b += BATCH) {
+    supabaseUpsert_('moviles', rows.slice(b, b + BATCH), ['cliente', 'movil']);
+  }
+  Logger.log('sincronizarFlotaASupabase: sincronizados ' + rows.length + ' móviles');
+}
+
+function setupSincronizarFlotaTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === 'sincronizarFlotaASupabase') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('sincronizarFlotaASupabase').timeBased().everyMinutes(5).create();
+  Logger.log('Trigger instalado: sincronizarFlotaASupabase cada 5 min');
 }
 
 // Callable desde google.script.run y desde doGet source=alta_movil
