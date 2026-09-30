@@ -1808,39 +1808,24 @@ function readPerdidaRutaData(cliente, fechaInicio, fechaFin) {
     }
   } catch(e) { Logger.log('readPerdidaRuta calMap: ' + e); dbg.calError = String(e); }
 
-  // ── Fase 2: Finalizados → finMap[normalize(cliente+" "+notacion)+"|"+fechaISO] = { count, movilRaw, fechaISO }
+  // ── Fase 2: Finalizados (Supabase) → finMap[normalize(cliente+" "+notacion)+"|"+fechaISO] = { count, movilRaw, fechaISO }
   var finMap = {}; // key → { count, movilRaw, fechaISO }
   var ejecutadas = 0;
   try {
-    const ssFin    = SpreadsheetApp.openById(SHEETS.finalizados);
-    const finSheet = ssFin.getSheetByName('Finalizados') || ssFin.getSheets()[0];
-    dbg.finExiste  = !!finSheet;
-    if (finSheet && finSheet.getLastRow() > 1) {
-      const finVals    = finSheet.getRange(1, 1, finSheet.getLastRow(), finSheet.getLastColumn()).getValues();
-      const finHeaders = finVals[0].map(function(h){ return String(h).trim(); });
-      dbg.finHeaders   = finHeaders;
-      dbg.finTotalRows = finVals.length - 1;
-      const idxFecha    = findIdx(finHeaders, 'Fecha');
-      const idxCliente  = findIdx(finHeaders, 'Cliente');
-      const idxNotacion = findIdx(finHeaders, 'Notacion');
-      dbg.finIdxFecha = idxFecha; dbg.finIdxCliente = idxCliente; dbg.finIdxNotacion = idxNotacion;
+    const filas = supabaseSelect_('rutas_finalizadas',
+      'select=cliente,movil,fecha&fecha=gte.' + fechaInicio + '&fecha=lte.' + fechaFin);
+    dbg.finExiste = true;
+    dbg.finTotalRows = filas.length;
 
-      for (var i = 1; i < finVals.length; i++) {
-        var row = finVals[i];
-        if (nc && idxCliente >= 0 && normalize_(String(row[idxCliente]||'')) !== nc) continue;
-        var fechaRawFin = row[idxFecha >= 0 ? idxFecha : 0];
-        if (!enRango(fechaRawFin)) continue;
-        var fechaISOFin  = formatDateISO(parseFlexibleDate(fechaRawFin));
-        var clienteVal   = idxCliente  >= 0 ? String(row[idxCliente] ||'').trim() : '';
-        var notacionVal  = idxNotacion >= 0 ? String(row[idxNotacion]||'').trim() : '';
-        var movilFull    = (clienteVal + (notacionVal ? ' ' + notacionVal : '')).trim();
-        var finKey       = normalize_(movilFull) + '|' + fechaISOFin;
-        var fe = finMap[finKey] || { count: 0, movilRaw: movilFull, fechaISO: fechaISOFin };
-        fe.count++;
-        finMap[finKey] = fe;
-        ejecutadas++;
-      }
-    }
+    filas.forEach(function(r) {
+      if (nc && normalize_(r.cliente || '') !== nc) return;
+      var movilFull = (r.cliente || '') + (r.movil ? ' ' + r.movil : '');
+      var finKey = normalize_(movilFull) + '|' + r.fecha;
+      var fe = finMap[finKey] || { count: 0, movilRaw: movilFull.trim(), fechaISO: r.fecha };
+      fe.count++;
+      finMap[finKey] = fe;
+      ejecutadas++;
+    });
   } catch(e) { Logger.log('readPerdidaRuta finMap: ' + e); dbg.finError = String(e); }
 
   // ── Fase 3: cruzar para encontrar rutas demás
@@ -2392,11 +2377,11 @@ function readHistorialInicios_(ss, hastaFecha, dias) {
     }
   }
 
-  // 1) Archivo histórico
+  // 1) Archivo histórico (Supabase — filtra por fecha con índice, no trae todo)
   try {
-    const finSS = SpreadsheetApp.openById(SHEETS.finalizados);
-    scan_(finSS.getSheetByName('Finalizados') || finSS.getSheets()[0],
-          { fecha: ['Fecha'], cliente: ['Cliente'], movil: ['Notacion', 'Notación', 'Móvil', 'Movil'], conductor: ['Conductor', 'Nombre Conductor'] });
+    const filas = supabaseSelect_('rutas_finalizadas',
+      'select=fecha,cliente,movil,conductor&fecha=gte.' + formatDateISO(corte) + '&order=fecha.desc&limit=5000');
+    filas.forEach(function(r) { add_(r.cliente, r.movil, parseFlexibleDate(r.fecha), r.conductor); });
   } catch (e) { /* seguir con lo que haya */ }
 
   // 2) Días recientes aún no archivados
@@ -2743,54 +2728,25 @@ function detectClienteFromMovil(nombreCompleto) {
 function readFinalizadosPorDia_(targetDate) {
   const targetDay = formatDateISO(targetDate);
   const result = {};
-  const ss = SpreadsheetApp.openById(SHEETS.finalizados);
-  const sheet = ss.getSheetByName('Finalizados') || ss.getSheets()[0];
-  if (!sheet) return result;
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return result;
+  const filas = supabaseSelect_('rutas_finalizadas',
+    'select=cliente,movil,conductor,comuna,hora_inicio,hora_termino&fecha=eq.' + targetDay);
 
-  const values = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
-  const headers = values[0].map(function(h){ return String(h || '').trim(); });
-  const idx = {};
-  headers.forEach(function(h, i){ idx[h] = i; });
-
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const fechaRaw = row[idx['Fecha']];
-    if (!fechaRaw) continue;
-    const fecha = parseFlexibleDate(fechaRaw);
-    if (!fecha || isNaN(fecha.getTime())) continue;
-    if (formatDateISO(fecha) !== targetDay) continue;
-
-    const cliente = String(row[idx['Cliente']] || '').trim();
-    const movil = String(row[idx['Notacion']] || '').trim();
-    if (!cliente || !movil) continue;
-
+  filas.forEach(function(r) {
+    const cliente = r.cliente || '', movil = r.movil || '';
+    if (!cliente || !movil) return;
     const key = normalize_(cliente) + '|' + normalize_(movil);
     result[key] = {
       cliente: cliente, movil: movil,
-      conductor: String(row[idx['Conductor']] || '').trim(),
-      comuna: String(row[idx['Comuna']] || '').trim(),
-      horaInicio: formatTime(row[idx['Hora Inicio']]),
-      horaTermino: formatTime(row[idx['Hora Termino']])
+      conductor: r.conductor || '',
+      comuna: r.comuna || '',
+      horaInicio: r.hora_inicio || '',
+      horaTermino: r.hora_termino || ''
     };
-  }
+  });
   return result;
 }
 
 function readFinalizados(fechaFinParam) {
-  const ss = SpreadsheetApp.openById(SHEETS.finalizados);
-  const sheet = ss.getSheetByName('Finalizados') || ss.getSheets()[0];
-  if (!sheet) return { rutas: [], conteoPorDia: {}, conteoPorCliente: {}, totalRutas: 0, ventanaDias: FINALIZADOS_DAYS_BACK };
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
-  if (lastRow < 2) return { rutas: [], conteoPorDia: {}, conteoPorCliente: {}, totalRutas: 0, ventanaDias: FINALIZADOS_DAYS_BACK };
-
-  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
-  const headers = values[0];
-  const idx = {};
-  headers.forEach((h, i) => { idx[String(h).trim()] = i; });
-
   const fechaFin = fechaFinParam ? parseFlexibleDate(fechaFinParam) : new Date();
   if (!fechaFin || isNaN(fechaFin.getTime())) throw new Error('Fecha inválida en readFinalizados: ' + fechaFinParam);
   fechaFin.setHours(23, 59, 59, 999);
@@ -2805,41 +2761,40 @@ function readFinalizados(fechaFinParam) {
   cutoff60.setDate(cutoff60.getDate() - TENDENCIAS_DAYS_BACK);
   cutoff60.setHours(0, 0, 0, 0);
 
+  // A diferencia de la planilla (que había que traer completa y filtrar acá),
+  // Postgres filtra por fecha con índice — solo viajan las filas de la ventana.
+  const filas = supabaseSelect_('rutas_finalizadas',
+    'select=id_item,fecha,cliente,movil,conductor,region,comuna,lugar_atencion,hora_inicio,hora_termino' +
+    '&fecha=gte.' + formatDateISO(cutoff60) + '&fecha=lte.' + formatDateISO(fechaFin) +
+    '&order=fecha.desc&limit=5000');
+
+  const cutoff30ISO = formatDateISO(cutoff30);
   const rutas = [];
   const conteoPorDia = {};
   const conteoPorCliente = {};
-  const conteoPorDia60 = {}; // conteos diarios para la ventana extendida de 60 días
+  const conteoPorDia60 = {};
 
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const fechaRaw = row[idx['Fecha']];
-    if (!fechaRaw) continue;
-    const fecha = parseFlexibleDate(fechaRaw);
-    if (!fecha || isNaN(fecha.getTime())) continue;
-    if (fecha < cutoff60 || fecha > fechaFin) continue;
-
-    const fechaISO = formatDateISO(fecha);
-    // Conteo extendido (60 días) — siempre si llegamos acá
+  filas.forEach(function(r) {
+    const fechaISO = r.fecha;
     conteoPorDia60[fechaISO] = (conteoPorDia60[fechaISO] || 0) + 1;
 
-    // Ventana principal (30 días): listado + agregados para Histórico
-    if (fecha >= cutoff30) {
-      const cliente = String(row[idx['Cliente']] || '').trim();
-      const movil = String(row[idx['Notacion']] || '').trim();
+    if (fechaISO >= cutoff30ISO) {
+      const cliente = r.cliente || '';
       rutas.push({
-        id: String(row[idx['ID']] || '').slice(0, 12),
-        fecha: fechaISO, cliente: cliente, movil: movil,
-        conductor: String(row[idx['Conductor']] || '').trim().slice(0, 60),
-        region: String(row[idx['Region']] || '').trim(),
-        comuna: String(row[idx['Comuna']] || '').trim(),
-        lugar: String(row[idx['Lugar de Atencion']] || '').trim().slice(0, 80),
-        horaInicio: formatTime(row[idx['Hora Inicio']]),
-        horaTermino: formatTime(row[idx['Hora Termino']])
+        id: (r.id_item || '').slice(0, 12),
+        fecha: fechaISO, cliente: cliente, movil: r.movil || '',
+        conductor: (r.conductor || '').slice(0, 60),
+        region: r.region || '',
+        comuna: r.comuna || '',
+        lugar: (r.lugar_atencion || '').slice(0, 80),
+        horaInicio: r.hora_inicio || '',
+        horaTermino: r.hora_termino || ''
       });
       conteoPorDia[fechaISO] = (conteoPorDia[fechaISO] || 0) + 1;
       if (cliente) conteoPorCliente[cliente] = (conteoPorCliente[cliente] || 0) + 1;
     }
-  }
+  });
+
   rutas.sort((a, b) => b.fecha.localeCompare(a.fecha));
   return {
     rutas: rutas.slice(0, 2000),
@@ -3608,6 +3563,23 @@ function supabaseSelect_(table, query) {
   return data || [];
 }
 
+// Inserta varias filas de una vez (POST /rest/v1/<tabla>). Misma service key.
+function supabaseInsert_(table, rows) {
+  if (!rows || !rows.length) return;
+  const cfg = supabaseConfig_();
+  const resp = UrlFetchApp.fetch(cfg.url + '/rest/v1/' + table, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { apikey: cfg.key, Authorization: 'Bearer ' + cfg.key, Prefer: 'return=minimal' },
+    payload: JSON.stringify(rows),
+    muteHttpExceptions: true
+  });
+  const code = resp.getResponseCode();
+  if (code >= 400) {
+    throw new Error('Supabase insert (' + table + '): HTTP ' + code + ' — ' + resp.getContentText());
+  }
+}
+
 // Callable desde google.script.run y desde doGet source=alta_movil
 function altaMovil(params) {
   if (!params) throw new Error('Faltan datos');
@@ -3684,6 +3656,66 @@ function testAltaBajaMovil() {
   });
   Logger.log('Delete status: ' + del.getResponseCode());
   Logger.log('✅ Prueba terminada. Revisa arriba que "Alta" y "Baja" tengan ok:true.');
+}
+
+// Corre esto UNA VEZ desde el editor para copiar el histórico de la pestaña
+// "Finalizados" a Supabase, antes de cortar la escritura/lectura hacia la
+// planilla. Es seguro correrlo más de una vez: si la tabla ya tiene datos,
+// no hace nada (para no duplicar).
+function backfillFinalizadosASupabase() {
+  const yaExiste = supabaseSelect_('rutas_finalizadas', 'select=id&limit=1');
+  if (yaExiste.length) {
+    Logger.log('⚠️ rutas_finalizadas ya tiene datos — no se vuelve a migrar (para no duplicar). Si quieres reiniciar, borra los datos de la tabla en Supabase primero.');
+    return;
+  }
+
+  const ss = SpreadsheetApp.openById(SHEETS.finalizados);
+  const sheet = ss.getSheetByName('Finalizados') || ss.getSheets()[0];
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 2) { Logger.log('Nada que migrar: la pestaña Finalizados está vacía.'); return; }
+
+  const values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = values[0].map(function(h){ return String(h || '').trim(); });
+  const idx = {};
+  headers.forEach(function(h, i){ idx[h] = i; });
+
+  const BATCH = 500;
+  let batch = [];
+  let total = 0, omitidas = 0;
+
+  function flush() {
+    if (!batch.length) return;
+    supabaseInsert_('rutas_finalizadas', batch);
+    total += batch.length;
+    Logger.log('Insertadas ' + total + ' filas...');
+    batch = [];
+  }
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const fechaRaw = row[idx['Fecha']];
+    const fecha = fechaRaw ? parseFlexibleDate(fechaRaw) : null;
+    if (!fecha || isNaN(fecha.getTime())) { omitidas++; continue; }
+
+    batch.push({
+      id_item: String(row[idx['ID']] || '').slice(0, 50),
+      fecha: formatDateISO(fecha),
+      cliente: String(row[idx['Cliente']] || '').trim(),
+      movil: String(row[idx['Notacion']] || '').trim(),
+      conductor: String(row[idx['Conductor']] || '').trim(),
+      region: String(row[idx['Region']] || '').trim(),
+      comuna: String(row[idx['Comuna']] || '').trim(),
+      lugar_atencion: String(row[idx['Lugar de Atencion']] || '').trim(),
+      hora_inicio: formatTime(row[idx['Hora Inicio']]),
+      hora_termino: formatTime(row[idx['Hora Termino']])
+    });
+
+    if (batch.length >= BATCH) flush();
+  }
+  flush();
+
+  Logger.log('✅ Backfill terminado: ' + total + ' filas migradas, ' + omitidas + ' omitidas (sin fecha válida).');
 }
 
 function clearWriteCaches_() {
@@ -4086,14 +4118,6 @@ function debugSupervisiones() {
 
 function archivarFinalizados() {
   const ss = SpreadsheetApp.openById(SHEETS.unificador);
-  const finSS = SpreadsheetApp.openById(SHEETS.finalizados);
-  var finSheet = finSS.getSheetByName('Finalizados') || finSS.getSheets()[0];
-  if (!finSheet) {
-    finSheet = finSS.insertSheet('Finalizados');
-    finSheet.appendRow(['ID','Fecha','Cliente','Notacion','Conductor','Region','Comuna','Lugar de Atencion','Hora Inicio','Hora Termino']);
-    finSheet.getRange(1, 1, 1, 10).setFontWeight('bold');
-    Logger.log('archivarFinalizados: pestaña "' + FINALIZADOS_TAB + '" creada.');
-  }
 
   // Día a archivar: ayer
   const ayer = new Date();
@@ -4101,23 +4125,11 @@ function archivarFinalizados() {
   ayer.setHours(0, 0, 0, 0);
   const fechaISO = formatDateISO(ayer);
 
-  // Leer headers de Finalizados para saber el orden de columnas
-  const finData = finSheet.getDataRange().getValues();
-  if (finData.length === 0) { Logger.log('archivarFinalizados: hoja Finalizados sin headers'); return; }
-  const finHeaders = finData[0].map(function(h){ return String(h || '').trim(); });
-
-  // Evitar duplicados: salir si ya existe esa fecha
-  const fechaColIdx = finHeaders.indexOf('Fecha');
-  if (fechaColIdx >= 0) {
-    for (var r = 1; r < finData.length; r++) {
-      var fraw = finData[r][fechaColIdx];
-      if (!fraw) continue;
-      var fd = parseFlexibleDate(String(fraw));
-      if (fd && formatDateISO(fd) === fechaISO) {
-        Logger.log('archivarFinalizados: ' + fechaISO + ' ya existe, omitiendo.');
-        return;
-      }
-    }
+  // Evitar duplicados: salir si ya existe esa fecha en Supabase
+  const yaExiste = supabaseSelect_('rutas_finalizadas', 'select=id&fecha=eq.' + fechaISO + '&limit=1');
+  if (yaExiste.length) {
+    Logger.log('archivarFinalizados: ' + fechaISO + ' ya existe, omitiendo.');
+    return;
   }
 
   // Leer términos del día anterior
@@ -4145,27 +4157,25 @@ function archivarFinalizados() {
     if (!iniMap[k]) iniMap[k] = ini; // primer inicio del día
   });
 
-  // Construir filas en el orden de columnas de Finalizados
   const newRows = terminos.map(function(ter) {
     var k = normalize_(ter.cliente) + '|' + normalize_(ter.movil);
     var ini = iniMap[k] || {};
-    var data = {
-      'ID':               ini.idItem || '',
-      'Fecha':            fechaISO,
-      'Cliente':          ter.cliente || '',
-      'Notacion':         ter.movil || '',
-      'Conductor':        ter.conductor || ini.conductor || '',
-      'Region':           ter.region || ini.region || '',
-      'Comuna':           ter.comuna || ini.comuna || '',
-      'Lugar de Atencion': ini.lugar || '',
-      'Hora Inicio':      ini.hora || '',
-      'Hora Termino':     ter.hora || ''
+    return {
+      id_item: ini.idItem || '',
+      fecha: fechaISO,
+      cliente: ter.cliente || '',
+      movil: ter.movil || '',
+      conductor: ter.conductor || ini.conductor || '',
+      region: ter.region || ini.region || '',
+      comuna: ter.comuna || ini.comuna || '',
+      lugar_atencion: ini.lugar || '',
+      hora_inicio: ini.hora || '',
+      hora_termino: ter.hora || ''
     };
-    return finHeaders.map(function(h) { return h in data ? data[h] : ''; });
   });
 
-  finSheet.getRange(finSheet.getLastRow() + 1, 1, newRows.length, finHeaders.length).setValues(newRows);
-  Logger.log('archivarFinalizados: guardadas ' + newRows.length + ' rutas para ' + fechaISO);
+  supabaseInsert_('rutas_finalizadas', newRows);
+  Logger.log('archivarFinalizados: guardadas ' + newRows.length + ' rutas para ' + fechaISO + ' en Supabase');
 }
 
 function crearTriggerArchivar() {
