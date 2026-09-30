@@ -2028,7 +2028,49 @@ function diagnosticoRendimiento() {
   medir('bitacora', function(){ return readBitacora(null); });
   medir('kilometros', function(){ return readKilometros(flotaInfo); });
   medir('gps', function(){ return readGPS(flotaInfo); });
+  medir('monday (4 consultas en paralelo)', function(){ return readMondayParallelBundle_(); });
   Logger.log('=== Fin del diagnóstico ===');
+}
+
+// Corré esto con la caché fría (clearCache() primero) para ver, con datos
+// reales, cuánto tarda el server en armar TODO lo que carga source=all /
+// getDashboardData en una sola ejecución — el mismo camino que usa el
+// dashboard al abrir la página. Sirve para separar "tarda el servidor" de
+// "tarda la red / el navegador", que el cronómetro de la página no distingue.
+function diagnosticoCargaCompleta() {
+  var t0 = new Date().getTime();
+  var flotaInfo = getCached('flota', readFlota, CACHE_DURATION_SECONDS);
+  Logger.log('flota: ' + (new Date().getTime() - t0) + ' ms (acumulado)');
+
+  var t1 = new Date().getTime();
+  getCached('unificador_today', function() { return readUnificador(flotaInfo, null); }, CACHE_DURATION_SECONDS);
+  Logger.log('+ unificador: ' + (new Date().getTime() - t1) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  var t2 = new Date().getTime();
+  getCached('gps', function() { return readGPS(flotaInfo); }, CACHE_GPS_SECONDS);
+  Logger.log('+ gps: ' + (new Date().getTime() - t2) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  var t3 = new Date().getTime();
+  getCached('historico_today', function() { return readFinalizados(null); }, CACHE_DURATION_SECONDS);
+  Logger.log('+ historico: ' + (new Date().getTime() - t3) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  var t4 = new Date().getTime();
+  getCached('supervisiones', function() { return readSupervisiones(flotaInfo); }, CACHE_DURATION_SECONDS);
+  Logger.log('+ supervisiones: ' + (new Date().getTime() - t4) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  var t5 = new Date().getTime();
+  readMondayParallelBundle_();
+  Logger.log('+ monday (paralelo): ' + (new Date().getTime() - t5) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  var t6 = new Date().getTime();
+  getCached('bitacora_today', function() { return readBitacora(null); }, CACHE_DURATION_SECONDS);
+  Logger.log('+ bitacora: ' + (new Date().getTime() - t6) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  var t7 = new Date().getTime();
+  getCached('segunda_ruta_today', function() { return readSegundaRuta(null); }, CACHE_DURATION_SECONDS);
+  Logger.log('+ segundaRuta: ' + (new Date().getTime() - t7) + ' ms | acumulado: ' + (new Date().getTime() - t0) + ' ms');
+
+  Logger.log('=== TOTAL EJECUCIÓN SERVER: ' + (new Date().getTime() - t0) + ' ms ===');
 }
 
 // Normaliza un string: lowercase, sin tildes, sin paréntesis, espacios colapsados
