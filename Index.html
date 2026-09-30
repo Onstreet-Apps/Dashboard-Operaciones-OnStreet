@@ -1543,7 +1543,7 @@ th.fp-mes-actual,td.fp-mes-actual{background:var(--info-bg)}
 // CONFIG
 // ============================================================================
 const API_URL = 'https://script.google.com/macros/s/AKfycbwgzwp6udBKjCyefdw_BGfBRS5gAIBBaPrJ70yXbwtkPWI1JbXb_8CFaXs8y2Fcv42-/exec';
-const REFRESH_INTERVAL_MIN = 5;
+const REFRESH_INTERVAL_MIN = 8;
 
 const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
 const mesesShort = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
@@ -1715,7 +1715,16 @@ function setStatus(state,msg){
   document.getElementById('statusDot').className='status-dot'+(state==='error'?' error':state==='loading'?' loading':'');
   document.getElementById('statusText').textContent=msg;
 }
-function startAutoRefresh(){if(refreshTimer)clearInterval(refreshTimer);refreshTimer=setInterval(loadData,REFRESH_INTERVAL_MIN*60*1000);}
+// setTimeout que se reprograma solo (no setInterval) para poder sumar un
+// margen aleatorio en cada vuelta. Con varios usuarios reales abriendo el
+// dashboard casi al mismo tiempo (ej. al empezar el turno), sus auto-refresh
+// quedarían pegados cada 5 min exactos para siempre y sus pedidos chocarían
+// una y otra vez contra el mismo backend; el margen aleatorio los separa.
+function startAutoRefresh(){
+  if(refreshTimer) clearTimeout(refreshTimer);
+  var jitterMs = Math.floor(Math.random()*90000);
+  refreshTimer = setTimeout(function(){ loadData(); startAutoRefresh(); }, REFRESH_INTERVAL_MIN*60*1000 + jitterMs);
+}
 
 function switchTab(ev,name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -4897,7 +4906,7 @@ function doLogout() {
   }
   sessionToken = null;
   localStorage.removeItem('os_token');
-  if (refreshTimer) clearInterval(refreshTimer);
+  if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
   showAuthScreen('login');
 }
