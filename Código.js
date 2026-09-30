@@ -1800,6 +1800,30 @@ function enviarEmailPlanNuevo_(email, nombreResp, plan) {
   });
 }
 
+// Solo lectura: NO manda emails ni escribe nada. Corré esto desde el editor
+// para ver, antes de que dispare el trigger, cuántos planes va a considerar
+// "nuevos" revisarYNotificarPlanesNuevos() — sirve para detectar si hay un
+// desfase de tipos/formato entre los ids de Monday y los guardados en la
+// hoja de notificados (lo que explicaría por qué el trigger tarda 35s: si
+// cree que hay muchos planes "nuevos" en cada corrida, manda esa cantidad
+// de emails en serie cada vez, no solo la primera vez).
+function diagnosticoPlanesNotificados() {
+  var t0 = new Date().getTime();
+  var planes = obtenerTodosLosPlanes_();
+  Logger.log('planes totales (rapida+integral+checklists): ' + planes.length + ' | ' + (new Date().getTime()-t0) + ' ms');
+  var notif = getPlanesYaNotificados_();
+  Logger.log('ids ya marcados como notificados: ' + Object.keys(notif.set).length);
+  var nuevos = planes.filter(function(p) { return p.id && !notif.set[String(p.id)]; });
+  Logger.log('planes que el trigger consideraría NUEVOS ahora mismo: ' + nuevos.length);
+  if (nuevos.length) {
+    Logger.log('primeros ids "nuevos" (para comparar formato): ' + nuevos.slice(0, 5).map(function(p){ return String(p.id); }).join(', '));
+  }
+  var idsMuestraNotificados = Object.keys(notif.set).slice(0, 5);
+  Logger.log('primeros ids ya notificados (para comparar formato): ' + idsMuestraNotificados.join(', '));
+  Logger.log('=== TOTAL: ' + (new Date().getTime()-t0) + ' ms ===');
+  return { totalPlanes: planes.length, yaNotificados: Object.keys(notif.set).length, nuevosAhora: nuevos.length };
+}
+
 // Ejecutar manualmente desde el editor para ver cómo llega el email de "plan nuevo" a tu correo.
 // Cambiá el email de destino en la línea de abajo si querés probar con otro.
 function probarEmailPlanNuevo() {
